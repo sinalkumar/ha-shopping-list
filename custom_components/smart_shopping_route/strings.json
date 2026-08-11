@@ -1,0 +1,136 @@
+{
+  "title": "Smart Shopping Route",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Create a shopping route",
+        "description": "Shopping item names and section descriptions are sent to the selected AI Task provider.",
+        "data": {
+          "profile_name": "Profile/store name",
+          "source_entity_id": "Source to-do list",
+          "ai_task_entity_id": "AI Task",
+          "sections": "Route sections",
+          "show_completed": "Show completed items",
+          "display_section_prefix": "Prefix item names with their section"
+        },
+        "data_description": {
+          "sections": "One section per line: SECTION NAME | optional hints. Line order is the walking route."
+        }
+      },
+      "reconfigure": {
+        "title": "Edit shopping route",
+        "description": "Changing route order does not reclassify items. Use Reclassify all after material hint changes.",
+        "data": {
+          "profile_name": "Profile/store name",
+          "source_entity_id": "Source to-do list",
+          "ai_task_entity_id": "AI Task",
+          "sections": "Route sections",
+          "show_completed": "Show completed items",
+          "display_section_prefix": "Prefix item names with their section"
+        },
+        "data_description": {
+          "sections": "One section per line: SECTION NAME | optional hints. Line order is the walking route."
+        }
+      }
+    },
+    "error": {
+      "malformed_sections": "A section line contains more than one | separator.",
+      "empty_section": "Every section needs a name.",
+      "reserved_section": "Unclassified / Other is added automatically and cannot be configured.",
+      "duplicate_section": "Section names must be unique, ignoring case.",
+      "no_sections": "Add at least one route section.",
+      "source_not_found": "The source to-do entity does not exist.",
+      "source_is_route": "A Smart Shopping Route entity cannot be used as a source.",
+      "source_no_update": "The source must support updating to-do items.",
+      "ai_task_not_found": "The AI Task entity does not exist.",
+      "ai_task_no_generate_data": "The AI Task does not support Generate data."
+    },
+    "abort": {
+      "reconfigure_successful": "The shopping route was updated."
+    }
+  },
+  "entity": {
+    "button": {
+      "refresh": {
+        "name": "Refresh shopping route"
+      }
+    },
+    "sensor": {
+      "unclassified_items": {
+        "name": "Unclassified items"
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh",
+      "description": "Refresh from the source and classify unknown items.",
+      "fields": {
+        "route_entity_id": {
+          "name": "Route entity",
+          "description": "The derived Smart Shopping Route Todo entity."
+        }
+      }
+    },
+    "set_item_section": {
+      "name": "Set item section",
+      "description": "Correct the route section for a source item UID.",
+      "fields": {
+        "route_entity_id": {
+          "name": "Route entity",
+          "description": "The derived Smart Shopping Route Todo entity."
+        },
+        "item_uid": {
+          "name": "Source item UID",
+          "description": "The stable UID of the authoritative source item."
+        },
+        "section": {
+          "name": "Section",
+          "description": "An exact configured section name."
+        },
+        "remember": {
+          "name": "Remember",
+          "description": "Reuse this correction for future matching summaries."
+        }
+      }
+    },
+    "forget_item_section": {
+      "name": "Forget item section",
+      "description": "Forget a classification and try it again.",
+      "fields": {
+        "route_entity_id": {
+          "name": "Route entity",
+          "description": "The derived Smart Shopping Route Todo entity."
+        },
+        "item_uid": {
+          "name": "Source item UID",
+          "description": "The stable UID of the authoritative source item."
+        }
+      }
+    },
+    "reclassify_all": {
+      "name": "Reclassify all",
+      "description": "Clear AI classifications and classify current items again. This can incur provider charges.",
+      "fields": {
+        "route_entity_id": {
+          "name": "Route entity",
+          "description": "The derived Smart Shopping Route Todo entity."
+        }
+      }
+    },
+    "clear_cache": {
+      "name": "Clear cache",
+      "description": "Clear cached AI classifications, preserving manual overrides by default.",
+      "fields": {
+        "route_entity_id": {
+          "name": "Route entity",
+          "description": "The derived Smart Shopping Route Todo entity."
+        },
+        "include_manual": {
+          "name": "Include manual overrides",
+          "description": "Also erase explicit manual corrections."
+        }
+      }
+    }
+  }
+}

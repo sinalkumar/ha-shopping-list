@@ -1,0 +1,60 @@
+refresh:
+  fields:
+    route_entity_id:
+      required: true
+      selector:
+        entity:
+          domain: todo
+          integration: smart_shopping_route
+set_item_section:
+  fields:
+    route_entity_id:
+      required: true
+      selector:
+        entity:
+          domain: todo
+          integration: smart_shopping_route
+    item_uid:
+      required: true
+      selector:
+        text:
+    section:
+      required: true
+      selector:
+        text:
+    remember:
+      default: true
+      selector:
+        boolean:
+forget_item_section:
+  fields:
+    route_entity_id:
+      required: true
+      selector:
+        entity:
+          domain: todo
+          integration: smart_shopping_route
+    item_uid:
+      required: true
+      selector:
+        text:
+reclassify_all:
+  fields:
+    route_entity_id:
+      required: true
+      selector:
+        entity:
+          domain: todo
+          integration: smart_shopping_route
+clear_cache:
+  fields:
+    route_entity_id:
+      required: true
+      selector:
+        entity:
+          domain: todo
+          integration: smart_shopping_route
+    include_manual:
+      default: false
+      selector:
+        boolean:

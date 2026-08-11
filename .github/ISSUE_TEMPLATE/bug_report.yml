@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible Smart Shopping Route problem
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include tokens, item names, addresses, private entity IDs, hostnames, logs, .storage data, or full Home Assistant configuration. Use synthetic replacements."
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem and synthetic reproduction
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Integration diagnostics
+      description: Attach only the integration-generated privacy-safe diagnostics after reviewing them.
