@@ -13,12 +13,14 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
+    CONF_AI_TASK_ENTITY_ID,
     CONF_DISPLAY_SECTION_PREFIX,
     CONF_PROFILE_NAME,
     CONF_SHOW_COMPLETED,
     DOMAIN,
 )
 from .coordinator import RouteCoordinator
+from .device import route_device_info
 from .models import decorate_summary, section_names, sort_items, strip_display_prefix
 
 
@@ -45,10 +47,10 @@ class SmartShoppingRouteTodo(TodoListEntity):
         self.coordinator = coordinator
         self._attr_name = entry.data[CONF_PROFILE_NAME]
         self._attr_unique_id = f"{entry.entry_id}_route"
+        self._attr_device_info = route_device_info(entry)
         self._attr_supported_features = self._proxy_features()
 
     def _proxy_features(self) -> int:
-        source = TodoListEntityFeature(self.coordinator.source.supported_features)
         allowed = (
             TodoListEntityFeature.CREATE_TODO_ITEM
             | TodoListEntityFeature.DELETE_TODO_ITEM
@@ -57,7 +59,11 @@ class SmartShoppingRouteTodo(TodoListEntity):
             | TodoListEntityFeature.SET_DUE_DATETIME_ON_ITEM
             | TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
         )
-        return int(source & allowed)
+        return int(self.coordinator.source.supported_features) & int(allowed)
+
+    @property
+    def _prefix_enabled(self) -> bool:
+        return bool(self.entry.data.get(CONF_DISPLAY_SECTION_PREFIX, False))
 
     @property
     def available(self) -> bool:
@@ -76,11 +82,11 @@ class SmartShoppingRouteTodo(TodoListEntity):
         decorated: list[TodoItem] = []
         for source_item in items:
             item = copy.copy(source_item)
-            if item.summary:
+            if item.summary and self._prefix_enabled:
                 item.summary = decorate_summary(
                     item.summary,
                     self.coordinator.section_for(source_item),
-                    bool(self.entry.data.get(CONF_DISPLAY_SECTION_PREFIX, False)),
+                    True,
                 )
             decorated.append(item)
         return decorated
@@ -97,7 +103,7 @@ class SmartShoppingRouteTodo(TodoListEntity):
                 self.hass,
                 [
                     self.coordinator.source.entity_id,
-                    self.entry.data["ai_task_entity_id"],
+                    self.entry.data[CONF_AI_TASK_ENTITY_ID],
                 ],
                 self._handle_dependency_state,
             )
@@ -111,21 +117,19 @@ class SmartShoppingRouteTodo(TodoListEntity):
     def _handle_dependency_state(self, _event) -> None:
         self.async_write_ha_state()
 
-    async def async_create_todo_item(self, item: TodoItem) -> None:
+    def _forward_summary(self, item: TodoItem) -> TodoItem:
         forwarded = copy.copy(item)
-        if forwarded.summary:
+        if forwarded.summary and self._prefix_enabled:
             forwarded.summary = strip_display_prefix(
                 forwarded.summary, section_names(self.coordinator.sections)
             )
-        await self.coordinator.source.async_create(forwarded)
+        return forwarded
+
+    async def async_create_todo_item(self, item: TodoItem) -> None:
+        await self.coordinator.source.async_create(self._forward_summary(item))
 
     async def async_update_todo_item(self, item: TodoItem) -> None:
-        forwarded = copy.copy(item)
-        if forwarded.summary:
-            forwarded.summary = strip_display_prefix(
-                forwarded.summary, section_names(self.coordinator.sections)
-            )
-        await self.coordinator.source.async_update(forwarded)
+        await self.coordinator.source.async_update(self._forward_summary(item))
 
     async def async_delete_todo_items(self, uids: list[str]) -> None:
         await self.coordinator.source.async_delete(uids)

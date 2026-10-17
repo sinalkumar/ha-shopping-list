@@ -19,11 +19,18 @@ from .const import (
     CONF_SECTIONS,
     CONF_SHOW_COMPLETED,
     CONF_SOURCE_ENTITY_ID,
+    CONFIG_ENTRY_VERSION,
     DEFAULT_DISPLAY_SECTION_PREFIX,
     DEFAULT_SHOW_COMPLETED,
     DOMAIN,
 )
-from .models import RouteParseError, RouteSection, parse_sections, serialize_sections
+from .models import (
+    RouteParseError,
+    RouteSection,
+    normalize_summary,
+    parse_sections,
+    serialize_sections,
+)
 
 DEFAULT_SECTIONS = """Produce | fruit and vegetables
 Bakery | bread and bakery
@@ -36,7 +43,7 @@ Household | cleaning supplies"""
 class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure a store route profile."""
 
-    VERSION = 1
+    VERSION = CONFIG_ENTRY_VERSION
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -55,26 +62,39 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         entry = self._get_reconfigure_entry() if reconfigure else None
         defaults = dict(entry.data) if entry else {}
         if user_input is not None:
+            name = str(user_input.get(CONF_PROFILE_NAME, "")).strip()
             try:
+                if not name:
+                    raise ValueError("empty_profile_name")
                 sections = parse_sections(user_input[CONF_SECTIONS])
                 self._validate_entities(user_input)
             except RouteParseError as err:
                 errors[CONF_SECTIONS] = err.code
             except ValueError as err:
-                errors["base"] = str(err)
+                key = str(err)
+                errors[CONF_PROFILE_NAME if key == "empty_profile_name" else "base"] = (
+                    key
+                )
             else:
                 data = {
                     **user_input,
+                    CONF_PROFILE_NAME: name,
                     CONF_SECTIONS: [
                         {"name": section.name, "hints": section.hints}
                         for section in sections
                     ],
                 }
                 if entry:
-                    return self.async_update_reload_and_abort(entry, data_updates=data)
-                return self.async_create_entry(
-                    title=user_input[CONF_PROFILE_NAME], data=data
-                )
+                    if self._name_taken(name, exclude_entry_id=entry.entry_id):
+                        errors[CONF_PROFILE_NAME] = "duplicate_profile_name"
+                    else:
+                        return self.async_update_reload_and_abort(
+                            entry, data_updates=data, title=name
+                        )
+                elif self._name_taken(name):
+                    errors[CONF_PROFILE_NAME] = "duplicate_profile_name"
+                else:
+                    return self.async_create_entry(title=name, data=data)
 
         schema = vol.Schema({
             vol.Required(
@@ -93,7 +113,8 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_SECTIONS,
                 default=(
                     serialize_sections(
-                        RouteSection(**raw) for raw in defaults[CONF_SECTIONS]
+                        RouteSection.from_mapping(raw)
+                        for raw in defaults[CONF_SECTIONS]
                     )
                     if defaults.get(CONF_SECTIONS)
                     else DEFAULT_SECTIONS
@@ -115,6 +136,23 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=schema,
             errors=errors,
         )
+
+    def _name_taken(self, name: str, *, exclude_entry_id: str | None = None) -> bool:
+        """Names must be unique because they become entity names.
+
+        Uniqueness is checked against current profile names rather than a
+        name-derived unique ID: a profile can be renamed, so a unique ID built
+        from its original name would block the wrong names afterwards.
+        """
+
+        wanted = normalize_summary(name)
+        for other in self._async_current_entries():
+            if exclude_entry_id is not None and other.entry_id == exclude_entry_id:
+                continue
+            existing = other.data.get(CONF_PROFILE_NAME) or other.title
+            if normalize_summary(str(existing)) == wanted:
+                return True
+        return False
 
     def _validate_entities(self, user_input: dict[str, Any]) -> None:
         source_id = user_input[CONF_SOURCE_ENTITY_ID]

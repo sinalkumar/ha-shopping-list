@@ -50,7 +50,10 @@ class SourceTodoAdapter:
 
     @property
     def supported_features(self) -> int:
-        return int(self.entity.supported_features or 0)
+        """Return source features, or 0 while the entity is not resolvable."""
+
+        entity = self._resolve()
+        return int(entity.supported_features or 0) if entity else 0
 
     def items(self) -> list[TodoItem]:
         return [copy.copy(item) for item in self.entity.todo_items or []]

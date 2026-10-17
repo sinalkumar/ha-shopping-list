@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 DOMAIN = "smart_shopping_route"
-VERSION = "0.1.0"
 PLATFORMS = ["todo", "button", "sensor"]
 
 CONF_PROFILE_NAME = "profile_name"
@@ -16,11 +15,23 @@ CONF_DISPLAY_SECTION_PREFIX = "display_section_prefix"
 DEFAULT_SHOW_COMPLETED = False
 DEFAULT_DISPLAY_SECTION_PREFIX = False
 FALLBACK_SECTION = "Unclassified / Other"
+
+# Config entry data schema version. Bump together with config_flow.VERSION and
+# add a migration branch in async_migrate_entry.
+CONFIG_ENTRY_VERSION = 1
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}.cache"
+STORAGE_SAVE_DELAY = 5
 MAX_CACHE_ENTRIES = 2000
+
 AI_TIMEOUT_SECONDS = 45
 AI_CONCURRENCY = 3
+# Answers below this confidence are treated as Unclassified / Other.
+AI_MIN_CONFIDENCE = 0.5
+# Failed or invalid AI responses are retried with capped exponential backoff so
+# a provider outage cannot trigger a billable request on every list change.
+AI_RETRY_BASE_SECONDS = 60
+AI_RETRY_MAX_SECONDS = 3600
 
 SERVICE_REFRESH = "refresh"
 SERVICE_SET_ITEM_SECTION = "set_item_section"
@@ -28,9 +39,7 @@ SERVICE_FORGET_ITEM_SECTION = "forget_item_section"
 SERVICE_RECLASSIFY_ALL = "reclassify_all"
 SERVICE_CLEAR_CACHE = "clear_cache"
 
-ATTR_ROUTE_ENTITY_ID = "route_entity_id"
 ATTR_ITEM_UID = "item_uid"
-ATTR_ITEM = "item"
 ATTR_SECTION = "section"
 ATTR_REMEMBER = "remember"
 ATTR_INCLUDE_MANUAL = "include_manual"

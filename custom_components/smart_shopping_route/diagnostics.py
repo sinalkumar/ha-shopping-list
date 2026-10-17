@@ -6,8 +6,9 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.loader import async_get_integration
 
-from .const import DOMAIN, VERSION
+from .const import CONF_AI_TASK_ENTITY_ID, DOMAIN
 from .coordinator import RouteCoordinator
 
 
@@ -16,9 +17,10 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return counts and feature flags, never item text or identifiers."""
     coordinator: RouteCoordinator = hass.data[DOMAIN][entry.entry_id]
-    ai_state = hass.states.get(entry.data["ai_task_entity_id"])
+    ai_state = hass.states.get(entry.data[CONF_AI_TASK_ENTITY_ID])
+    integration = await async_get_integration(hass, DOMAIN)
     return {
-        "integration_version": VERSION,
+        "integration_version": str(integration.version),
         "section_count": len(coordinator.sections),
         "source_supported_features": coordinator.source.supported_features,
         "ai_task_supported_features": (
@@ -29,5 +31,7 @@ async def async_get_config_entry_diagnostics(
         "uid_override_count": len(coordinator.cache.uid_overrides),
         "unclassified_count": coordinator.unclassified_count,
         "pending_count": len(coordinator.pending),
-        "source_available": coordinator.source.available,
+        "scheduled_retry_count": coordinator.retry_scheduled_count,
+        "source_available": coordinator.available,
+        "ai_available": coordinator.ai_available,
     }

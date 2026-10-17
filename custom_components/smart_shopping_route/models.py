@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from .const import FALLBACK_SECTION
 
@@ -17,6 +17,20 @@ class RouteSection:
 
     name: str
     hints: str = ""
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> RouteSection:
+        """Build a section from config entry data, ignoring unknown keys.
+
+        Config entry data is persisted user data, so a future or partially
+        written key must never make the whole profile fail to load.
+        """
+
+        name = raw.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("section_name_missing")
+        hints = raw.get("hints", "")
+        return cls(name.strip(), hints.strip() if isinstance(hints, str) else "")
 
 
 class ItemLike(Protocol):

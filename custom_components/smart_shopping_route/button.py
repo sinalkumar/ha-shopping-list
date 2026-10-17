@@ -9,6 +9,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import RouteCoordinator
+from .device import route_device_info
 
 
 async def async_setup_entry(
@@ -28,6 +29,7 @@ class RefreshRouteButton(ButtonEntity):
 
     def __init__(self, entry: ConfigEntry, coordinator: RouteCoordinator) -> None:
         self._attr_unique_id = f"{entry.entry_id}_refresh"
+        self._attr_device_info = route_device_info(entry)
         self.coordinator = coordinator
 
     @property

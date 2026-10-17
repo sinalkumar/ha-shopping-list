@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,7 +21,12 @@ class Classification:
 
 
 class ClassificationCache:
-    """A small per-profile LRU cache with separate per-UID overrides."""
+    """A small per-profile LRU cache with separate per-UID overrides.
+
+    The cache is the single source of truth for classifications: a remembered
+    manual correction and a UID-only correction live here, never in the
+    coordinator, so that clearing or pruning always sees both.
+    """
 
     def __init__(self, max_entries: int = MAX_CACHE_ENTRIES) -> None:
         self.max_entries = max_entries
@@ -50,10 +56,24 @@ class ClassificationCache:
     def set_uid(self, uid: str, section: str) -> None:
         self.uid_overrides[uid] = section
 
+    def forget_uid(self, uid: str) -> bool:
+        """Drop a UID-only correction; return whether anything changed."""
+
+        return self.uid_overrides.pop(uid, None) is not None
+
     def forget(self, summary: str, uid: str | None = None) -> None:
         self.entries.pop(normalize_summary(summary), None)
         if uid:
             self.uid_overrides.pop(uid, None)
+
+    def prune_uids(self, valid_uids: Iterable[str]) -> bool:
+        """Drop overrides for items that no longer exist in the source list."""
+
+        valid = set(valid_uids)
+        stale = [uid for uid in self.uid_overrides if uid not in valid]
+        for uid in stale:
+            del self.uid_overrides[uid]
+        return bool(stale)
 
     def clear_ai(self) -> None:
         self.entries = {
@@ -109,12 +129,13 @@ class ClassificationCache:
                     bool(raw.get("manual", False)),
                     float(raw.get("last_used", 0)),
                 )
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, AttributeError):
                 continue
-        cache.uid_overrides = {
-            str(uid): str(section)
-            for uid, section in data.get("uid_overrides", {}).items()
-        }
+        overrides = data.get("uid_overrides", {})
+        if isinstance(overrides, dict):
+            cache.uid_overrides = {
+                str(uid): str(section) for uid, section in overrides.items()
+            }
         cache._trim()
         return cache
 

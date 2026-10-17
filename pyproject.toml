@@ -2,10 +2,19 @@ license = "MIT"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra --strict-markers"
 filterwarnings = [
   "ignore:Inheritance class HomeAssistantApplication.*:DeprecationWarning:homeassistant.components.http.server",
   "ignore:'asyncio.iscoroutinefunction'.*:DeprecationWarning:backoff.*",
+]
+
+[tool.coverage.run]
+source = ["custom_components/smart_shopping_route"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
 ]
 
 [tool.ruff]

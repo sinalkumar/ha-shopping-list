@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import RouteCoordinator
+from .device import route_device_info
 
 
 async def async_setup_entry(
@@ -30,17 +31,24 @@ class UnclassifiedSensor(SensorEntity):
 
     def __init__(self, entry: ConfigEntry, coordinator: RouteCoordinator) -> None:
         self._attr_unique_id = f"{entry.entry_id}_unclassified"
+        self._attr_device_info = route_device_info(entry)
         self.coordinator = coordinator
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.available
 
     @property
     def native_value(self) -> int:
         return self.coordinator.unclassified_count
 
     @property
-    def extra_state_attributes(self) -> dict[str, int]:
+    def extra_state_attributes(self) -> dict[str, int | bool]:
         return {
             "cached_classifications": len(self.coordinator.cache.entries),
             "pending_classifications": len(self.coordinator.pending),
+            "scheduled_retries": self.coordinator.retry_scheduled_count,
+            "ai_available": self.coordinator.ai_available,
         }
 
     async def async_added_to_hass(self) -> None:

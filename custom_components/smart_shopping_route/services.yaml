@@ -1,19 +1,14 @@
 refresh:
-  fields:
-    route_entity_id:
-      required: true
-      selector:
-        entity:
-          domain: todo
-          integration: smart_shopping_route
+  target:
+    entity:
+      integration: smart_shopping_route
+      domain: todo
 set_item_section:
+  target:
+    entity:
+      integration: smart_shopping_route
+      domain: todo
   fields:
-    route_entity_id:
-      required: true
-      selector:
-        entity:
-          domain: todo
-          integration: smart_shopping_route
     item_uid:
       required: true
       selector:
@@ -27,33 +22,26 @@ set_item_section:
       selector:
         boolean:
 forget_item_section:
+  target:
+    entity:
+      integration: smart_shopping_route
+      domain: todo
   fields:
-    route_entity_id:
-      required: true
-      selector:
-        entity:
-          domain: todo
-          integration: smart_shopping_route
     item_uid:
       required: true
       selector:
         text:
 reclassify_all:
-  fields:
-    route_entity_id:
-      required: true
-      selector:
-        entity:
-          domain: todo
-          integration: smart_shopping_route
+  target:
+    entity:
+      integration: smart_shopping_route
+      domain: todo
 clear_cache:
+  target:
+    entity:
+      integration: smart_shopping_route
+      domain: todo
   fields:
-    route_entity_id:
-      required: true
-      selector:
-        entity:
-          domain: todo
-          integration: smart_shopping_route
     include_manual:
       default: false
       selector:
