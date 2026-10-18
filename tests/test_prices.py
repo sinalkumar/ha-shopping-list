@@ -1666,7 +1666,7 @@ def test_retailer_comparative_price_is_preferred() -> None:
             "unitQuantity": 100,
             "unitQuantityUom": "sheets",
         })
-        == "$0.31/100sheets"
+        == "$0.31/100 sheets"
     )
     assert _comparative_unit_price({}) is None
 
@@ -1687,6 +1687,26 @@ def test_woolworths_quote_carries_size_and_unit_price() -> None:
     assert result is not None
     assert result.size == "1.2kg"
     assert result.unit_price == "$7.47/kg"
+
+
+def test_woolworths_weight_only_variant_uses_the_formatted_kilo_price() -> None:
+    body = woolworths_body([
+        {
+            "sku": "1",
+            "productName": "Loose Bananas",
+            "variants": [
+                {"unitOfMeasure": "KG", "variantPrice": {"sellingPrice": 2.675}}
+            ],
+        }
+    ])
+    client = WoolworthsPriceClient(SimpleNamespace())
+    client._session = FakeSession([FakeResponse(200, body)])
+
+    result = asyncio.run(client.async_lookup("bananas"))
+
+    assert result is not None
+    assert result.size is None
+    assert result.unit_price == "$2.68/kg"
 
 
 def test_paknsave_quote_uses_the_comparative_price() -> None:
@@ -1759,6 +1779,44 @@ def test_exact_pack_metadata_not_reverse_rounded_price(
     result = asyncio.run(client.async_lookup("butter"))
     assert result.size == expected_size
     assert result.unit_price == expected_unit
+
+
+@pytest.mark.parametrize(
+    ("price", "pack", "expected"),
+    [
+        (8.29, "8 x 270 sheets", "$0.38/100 sheets"),
+        (0.40, "200 sheet", "$0.20/100 sheets"),
+        (1.0, "1000 count", "<$0.01/ea"),
+        (1.0, "200 count", "$0.01/ea"),
+    ],
+)
+def test_subcent_unit_prices_do_not_look_free(price, pack, expected):
+    from smart_shopping_route.prices import compute_unit_price, size_from_text
+
+    assert compute_unit_price(price, size_from_text(pack)) == expected
+
+
+@pytest.mark.parametrize(
+    ("cents", "amount", "unit", "expected"),
+    [
+        (38, 100, "sheets", "$0.38/100 sheets"),
+        (0.38, 1, "sheet", "$0.38/100 sheets"),
+        (0.1, 1, "ea", "<$0.01/ea"),
+        (0.5, 1, "ea", "$0.01/ea"),
+        (1, 1e-321, "g", None),
+    ],
+)
+def test_comparative_subcent_prices_are_readable(cents, amount, unit, expected):
+    from smart_shopping_route.prices import _comparative_unit_price
+
+    assert (
+        _comparative_unit_price({
+            "pricePerUnit": cents,
+            "unitQuantity": amount,
+            "unitQuantityUom": unit,
+        })
+        == expected
+    )
 
 
 def test_comparative_unit_price_drops_a_redundant_one() -> None:

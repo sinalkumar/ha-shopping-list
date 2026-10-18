@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.1
+
+- Show paper comparisons per 100 sheets rather than rounding each sheet to
+  `$0.00`. Other positive sub-cent comparisons display `<$0.01` instead of zero.
+- Use consistent half-up unit-price rounding and safely reject unrepresentable
+  comparative prices.
+
 ## 0.8.0
 
 ### Fixed

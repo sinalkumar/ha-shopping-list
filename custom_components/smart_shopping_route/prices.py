@@ -212,6 +212,17 @@ def size_from_text(text: str) -> tuple[str, float, str] | None:
     return (label, total, "sheets" if unit.startswith("sheet") else "ea")
 
 
+def _format_unit_price(cost: Decimal, unit: str) -> str:
+    """Avoid rounding a positive per-unit cost to an apparent free unit."""
+    if unit == "sheets":
+        cost *= 100
+        unit = "100 sheets"
+    rounded = cost.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if rounded == 0:
+        return f"<$0.01/{unit}"
+    return f"${rounded:.2f}/{unit}"
+
+
 def compute_unit_price(price: float, size: tuple[str, float, str] | None) -> str | None:
     """Return a per-unit price such as ``$6.66/kg``, or None when unknowable."""
 
@@ -221,12 +232,9 @@ def compute_unit_price(price: float, size: tuple[str, float, str] | None) -> str
     if not base_unit or not math.isfinite(amount) or amount <= 0:
         return None
     try:
-        unit_price = (Decimal(str(price)) / Decimal(str(amount))).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
+        return _format_unit_price(Decimal(str(price)) / Decimal(str(amount)), base_unit)
     except InvalidOperation:
         return None
-    return f"${unit_price:.2f}/{base_unit}"
 
 
 def _comparative_unit_price(comparative: dict[str, Any]) -> str | None:
@@ -248,12 +256,17 @@ def _comparative_unit_price(comparative: dict[str, Any]) -> str | None:
         ):
             return None
         unit = str(uom).lower()
+        decimal_cost = Decimal(str(per_unit)) / 100
         if unit in _UNIT_LABELS:
             base, factor = _UNIT_LABELS[unit]
-            return f"${cost / (amount * factor):.2f}/{base}"
+            return _format_unit_price(
+                decimal_cost / (Decimal(str(amount)) * Decimal(str(factor))), base
+            )
+        if unit in ("sheet", "sheets"):
+            return _format_unit_price(decimal_cost / Decimal(str(amount)), "sheets")
         basis = f"{amount:g}{uom}" if amount != 1 else str(uom)
-        return f"${cost:.2f}/{basis}"
-    except (TypeError, ValueError):
+        return _format_unit_price(decimal_cost, basis)
+    except (TypeError, ValueError, InvalidOperation):
         return None
 
 
@@ -495,7 +508,7 @@ class WoolworthsPriceClient(PriceClient):
                     size=(parsed[0] if (parsed := size_from_text(name)) else None),
                     unit_price=compute_unit_price(float(selling), size_from_text(name))
                     or (
-                        f"${selling:.2f}/kg"
+                        _format_unit_price(Decimal(str(selling)), "kg")
                         if variants[0].get("unitOfMeasure") == "KG"
                         else None
                     ),
