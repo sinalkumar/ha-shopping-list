@@ -132,6 +132,28 @@ data:
 
 Pins are per profile and per chain, because each retailer has its own catalogue. A pin survives the item being ticked off and added again.
 
+### Multi-year history from grocer.nz
+
+[grocer.nz](https://grocer.nz) publishes its New Zealand grocery dataset as public, unauthenticated files. Set **Price history store** while configuring to use it:
+
+| What it gives | Why it matters |
+|---|---|
+| Daily price history per product **per store**, back to 2022 | The only way to see Pak'nSave specials, since Foodstuffs publishes no was-price |
+| Sale prices for Woolworths (29% of their catalogue) | Cross-checks the retailer's own was-price |
+| A store catalogue across 6 banners and 475 stores | Resolves store names, and compares across chains |
+
+The catalogue (about 7 MB) is mirrored to `.storage/smart_shopping_route/grocer/`, refreshed weekly; your store's price file is refreshed every 12 hours. **The mirror is deliberate:** if grocer.nz is unreachable the integration keeps using the local copy, and the history it already downloaded is never thrown away.
+
+History is imported only when the match is **self-validating**: the catalogue product's price must agree with the price the retailer just quoted, either its regular or its sale price. A name that merely looks similar is not enough, so another product's history cannot be attached to your item. Once imported, a series looks like this:
+
+```
+Weet-Bix 1.2kg at PAK'nSAVE Ormiston
+  1,533 daily readings · 2022-06-14 → now · 147 price changes
+  lowest $4.49 · highest $8.49 · now $7.99
+```
+
+If you leave **Price history store** blank, the integration keeps its own history from the first reading instead, which works but starts today. grocer.nz is a third party: nothing here depends on it, and the route, classification, and current prices all work without it.
+
 ### Price history and drops
 
 Woolworths publishes a real was-price, so specials are detected from it. Pak'nSave publishes **no was-price anywhere in its API**, so the integration keeps its own price series per item: one point per price change, sampled every six hours otherwise, capped at 60 points per item and 500 items.

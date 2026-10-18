@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- Optional multi-year price history from grocer.nz, which publishes its New
+  Zealand grocery dataset as public files. Daily per-store history goes back to
+  2022, which is the only way to see Pak'nSave specials because Foodstuffs
+  publishes no was-price at all.
+- The dataset is mirrored locally (catalogue weekly, the profile's store every
+  12 hours) so an outage falls back to the local copy and downloaded history is
+  never lost. Diagnostics report `grocer_history` and `grocer_mirror_bytes`.
+- History is imported only for self-validating matches: the catalogue price must
+  agree with the price the retailer just quoted, so a similar-looking name alone
+  cannot attach another product's history. Our own readings are kept on top of
+  the import because they are fresher.
+- Store names resolve against the grocer.nz catalogue, so "PakNSave Ormiston"
+  and "PAK'nSAVE Ormiston" both work.
+
+### Notes
+
+- `duckdb` is added as a requirement for reading the dataset. The integration
+  works without it; history is simply unavailable.
+
 ## 0.5.0
 
 ### Added

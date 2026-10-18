@@ -424,6 +424,8 @@ def test_price_diagnostics_expose_counts_only(monkeypatch) -> None:
         "scheduled_retries",
         "pinned_items",
         "items_with_history",
+        "grocer_history",
+        "grocer_mirror_bytes",
     }
     assert "Anchor" not in repr(payload)
     assert "Butter" not in repr(payload)

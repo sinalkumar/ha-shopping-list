@@ -44,6 +44,8 @@ PRICE_KEYS = {
     "scheduled_retries",
     "pinned_items",
     "items_with_history",
+    "grocer_history",
+    "grocer_mirror_bytes",
 }
 
 
@@ -93,6 +95,8 @@ class FakePriceCoordinator:
             "scheduled_retries": 0,
             "pinned_items": 0,
             "items_with_history": 0,
+            "grocer_history": False,
+            "grocer_mirror_bytes": 0,
         }
 
     @property

@@ -23,9 +23,12 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    CONF_GROCER_STORE_ID,
     CONF_PRICE_CHAIN,
     CONF_PRICE_STORE_ID,
     DOMAIN,
+    GROCER_CATALOGUE_REFRESH_HOURS,
+    GROCER_STORE_REFRESH_HOURS,
     PRICE_CONCURRENCY,
     PRICE_FAILURE_BACKOFF_SECONDS,
     PRICE_HISTORY_MAX,
@@ -34,6 +37,7 @@ from .const import (
     PRICE_PIN_MAX,
     PRICE_REFRESH_HOURS,
 )
+from .grocer import GrocerData, GrocerError
 from .models import normalize_summary
 from .prices import PriceClient, PriceError, PriceQuote, ProductPin, create_client
 from .storage import PriceStore
@@ -199,6 +203,14 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._closed = False
         self._pins: dict[str, ProductPin] = {}
         self._on_update: Callable[[], None] | None = None
+        self._grocer_data: GrocerData | None = None
+        self._hass_ref = hass
+        self.grocer_store_id: int | None = entry.data.get(CONF_GROCER_STORE_ID)
+        # Products whose history has already been imported, so a backfill runs
+        # once per product rather than on every refresh.
+        self._backfilled: set[str] = set()
+        self._last_catalogue_sync = 0.0
+        self._last_store_sync = 0.0
         self._price_store = PriceStore(hass, entry.entry_id)
         self._unsub_listener: CALLBACK_TYPE | None = None
         super().__init__(
@@ -219,6 +231,88 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
     @property
     def enabled(self) -> bool:
         return self._client is not None
+
+    @property
+    def history_enabled(self) -> bool:
+        """grocer.nz history is available for this profile."""
+
+        return self.grocer_store_id is not None and GrocerData.duckdb_available()
+
+    @property
+    def grocer(self) -> GrocerData:
+        """Created lazily: it needs a config dir, and most paths never use it."""
+
+        if self._grocer_data is None:
+            self._grocer_data = GrocerData(self._hass_ref)
+        return self._grocer_data
+
+    async def async_sync_grocer(self, *, force: bool = False) -> None:
+        """Mirror the catalogue and this store's prices, tolerating failure.
+
+        Both are refreshed on their own slow schedule rather than every time, so
+        a restart does not re-download the catalogue. A failure leaves the
+        existing mirror in place, which is the point of keeping one.
+        """
+
+        if not self.history_enabled or self.grocer_store_id is None:
+            return
+        now = time.time()
+        try:
+            if (
+                force
+                or now - self._last_catalogue_sync
+                >= GROCER_CATALOGUE_REFRESH_HOURS * 3600
+            ):
+                if await self.grocer.async_sync_catalogue():
+                    self._last_catalogue_sync = now
+            if (
+                force
+                or now - self._last_store_sync >= GROCER_STORE_REFRESH_HOURS * 3600
+            ):
+                if await self.grocer.async_sync_store_prices(self.grocer_store_id):
+                    self._last_store_sync = now
+        except GrocerError as err:
+            _LOGGER.debug("grocer.nz sync failed: %s", err)
+
+    async def _async_backfill(self, key: str, quote: PriceQuote) -> None:
+        """Import multi-year history for a validated grocer.nz match.
+
+        The match is validated against the price the retailer just quoted, so an
+        import cannot attach another product's history.
+        """
+
+        if (
+            not self.history_enabled
+            or self.grocer_store_id is None
+            or key in self._backfilled
+        ):
+            return
+        self._backfilled.add(key)
+        try:
+            match = await self.grocer.async_match_with_history(
+                self.grocer_store_id, quote.product_name, quote.price
+            )
+        except GrocerError as err:
+            _LOGGER.debug("grocer.nz match failed: %s", err)
+            return
+        if match is None or not match.history:
+            return
+        imported = [
+            PricePoint(ts, price)
+            for ts, price in match.history[-PRICE_HISTORY_MAX_POINTS:]
+        ]
+        existing = self._snapshot.history.get(key, [])
+        if existing:
+            # Keep our own observations too: they are fresher than the mirror.
+            merged = {round(point.ts): point for point in imported}
+            merged.update({round(point.ts): point for point in existing})
+            combined = [merged[ts] for ts in sorted(merged)]
+        else:
+            combined = imported
+        self._snapshot.history[key] = combined[-PRICE_HISTORY_MAX_POINTS:]
+        _LOGGER.debug(
+            "Imported %s historical price point(s) for one item", len(imported)
+        )
 
     @property
     def _chain_key(self) -> str:
@@ -278,6 +372,14 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 _LOGGER.debug("Dropping a pin recorded for a different chain")
                 continue
             self._pins[key] = ProductPin.from_dict(self._chain_key, value)
+        grocer = data.get("grocer") if isinstance(data.get("grocer"), dict) else {}
+        for attr, key in (
+            ("_last_catalogue_sync", "catalogue_at"),
+            ("_last_store_sync", "store_at"),
+        ):
+            value = grocer.get(key)
+            if isinstance(value, (int, float)):
+                setattr(self, attr, float(value))
         history = data.get("history")
         if isinstance(history, dict):
             for key, entry in history.items():
@@ -304,6 +406,10 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "history": {
                 key: {"points": [[point.ts, point.price] for point in series]}
                 for key, series in self._snapshot.history.items()
+            },
+            "grocer": {
+                "catalogue_at": self._last_catalogue_sync,
+                "store_at": self._last_store_sync,
             },
         })
 
@@ -424,6 +530,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             await self.async_refresh(force=False)
 
     async def _async_refresh_guarded(self) -> None:
+        await self.async_sync_grocer()
         try:
             await super().async_refresh()
         except UpdateFailed:
@@ -565,6 +672,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._snapshot.failed.discard(key)
         self._record_history(key, quote)
         self._snapshot.quotes[key] = quote
+        await self._async_backfill(key, quote)
 
     def _record_history(self, key: str, quote: PriceQuote) -> None:
         """Append an observation, then derive the drop from the series.
@@ -623,4 +731,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "scheduled_retries": len(self._backoff_until),
             "pinned_items": len(self._pins),
             "items_with_history": len(self._snapshot.history),
+            "grocer_history": self.history_enabled,
+            "grocer_mirror_bytes": (
+                self.grocer.mirrored_bytes() if self.history_enabled else 0
+            ),
         }

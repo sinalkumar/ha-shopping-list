@@ -38,6 +38,13 @@ PRICE_HISTORY_MAX = 500
 # sampled so a long-running profile keeps a usable series without growing.
 PRICE_HISTORY_MAX_POINTS = 60
 PRICE_HISTORY_MIN_INTERVAL = 6 * 3600
+
+# grocer.nz mirror. History is the only source of Pak'nSave reference prices, so
+# it is kept on disk and refreshed slowly rather than fetched on demand.
+GROCER_MIRROR_DIR = f".storage/{DOMAIN}/grocer"
+GROCER_CATALOGUE_REFRESH_HOURS = 24 * 7
+GROCER_STORE_REFRESH_HOURS = 12
+CONF_GROCER_STORE_ID = "grocer_store_id"
 # Pins outlive their item by design, so they need their own ceiling.
 PRICE_PIN_MAX = 200
 

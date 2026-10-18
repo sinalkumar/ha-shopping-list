@@ -16,6 +16,7 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_AI_TASK_ENTITY_ID,
     CONF_DISPLAY_SECTION_PREFIX,
+    CONF_GROCER_STORE_ID,
     CONF_PRICE_CHAIN,
     CONF_PRICE_STORE_ID,
     CONF_PROFILE_NAME,
@@ -28,6 +29,7 @@ from .const import (
     DEFAULT_SHOW_COMPLETED,
     DOMAIN,
 )
+from .grocer import GrocerData, GrocerError
 from .models import (
     RouteParseError,
     RouteSection,
@@ -91,6 +93,7 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 sections = parse_sections(user_input[CONF_SECTIONS])
                 self._validate_entities(user_input)
                 price_store_id = await self._async_resolve_store(user_input)
+                grocer_store_id = await self._async_resolve_grocer_store(user_input)
             except RouteParseError as err:
                 errors[CONF_SECTIONS] = err.code
             except ValueError as err:
@@ -107,6 +110,7 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     **user_input,
                     CONF_PROFILE_NAME: name,
                     CONF_PRICE_STORE_ID: price_store_id,
+                    CONF_GROCER_STORE_ID: grocer_store_id,
                     CONF_SECTIONS: [
                         {"name": section.name, "hints": section.hints}
                         for section in sections
@@ -172,12 +176,44 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PRICE_STORE_ID,
                 default=defaults.get(CONF_PRICE_STORE_ID, ""),
             ): selector.TextSelector(),
+            vol.Optional(
+                CONF_GROCER_STORE_ID,
+                default=defaults.get(CONF_GROCER_STORE_ID, ""),
+            ): selector.TextSelector(),
         })
         return self.async_show_form(
             step_id="reconfigure" if reconfigure else "user",
             data_schema=schema,
             errors=errors,
         )
+
+    async def _async_resolve_grocer_store(
+        self, user_input: dict[str, Any]
+    ) -> int | None:
+        """Resolve the grocer.nz store used for price history.
+
+        Left blank, history is simply unavailable; it is never required, because
+        grocer.nz is a third party and the route works without it.
+        """
+
+        wanted = str(user_input.get(CONF_GROCER_STORE_ID) or "").strip()
+        if not wanted:
+            return None
+        if not GrocerData.duckdb_available():
+            raise ValueError("grocer_unavailable")
+        if wanted.isdigit():
+            return int(wanted)
+        data = GrocerData(self.hass)
+        try:
+            await data.async_sync_catalogue()
+            store_id = await self.hass.async_add_executor_job(
+                data.resolve_store, wanted
+            )
+        except GrocerError as err:
+            raise ValueError("grocer_unavailable") from err
+        if store_id is None:
+            raise ValueError("grocer_store_not_found")
+        return store_id
 
     def _name_taken(self, name: str, *, exclude_entry_id: str | None = None) -> bool:
         """Names must be unique because they become entity names.
