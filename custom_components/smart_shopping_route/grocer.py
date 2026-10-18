@@ -25,6 +25,7 @@ import asyncio
 import logging
 import re
 import threading
+import uuid
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -166,6 +167,7 @@ class GrocerData:
         # safe for concurrent use from several threads: doing so returns
         # malformed result sets rather than raising. All access is serialised.
         self._db_lock = threading.Lock()
+        self._mirror_bytes: int | None = None
 
     # -- infrastructure ---------------------------------------------------
 
@@ -189,16 +191,38 @@ class GrocerData:
         return True
 
     def _connect(self) -> Any:
-        if self._duckdb is None:
-            try:
-                import duckdb
-            except ImportError as err:  # pragma: no cover - import guard
-                raise GrocerError("duckdb is not installed") from err
-            path = self._dir / CATALOGUE_FILE
-            if not path.exists():
-                raise GrocerError("grocer.nz catalogue is not mirrored yet")
+        """Return the shared connection, creating it at most once.
+
+        Creation happens under the same lock as queries: two executor threads
+        arriving together would otherwise build two connections and leak one,
+        and the catalogue can be replaced underneath a live handle.
+        """
+
+        if self._duckdb is not None:
+            return self._duckdb
+        try:
+            import duckdb
+        except ImportError as err:  # pragma: no cover - import guard
+            raise GrocerError("duckdb is not installed") from err
+        path = self._dir / CATALOGUE_FILE
+        if not path.exists():
+            raise GrocerError("grocer.nz catalogue is not mirrored yet")
+        try:
             self._duckdb = duckdb.connect(str(path), read_only=True)
+        except Exception as err:
+            raise GrocerError("grocer.nz catalogue could not be opened") from err
         return self._duckdb
+
+    def _close_connection(self) -> None:
+        """Drop the open handle so the next query reopens the new file."""
+
+        with self._db_lock:
+            connection, self._duckdb = self._duckdb, None
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
     def _query(self, sql: str, params: list | None = None) -> list[tuple]:
         """Run one query, serialised against every other query.
@@ -208,10 +232,9 @@ class GrocerData:
         corrupts matches. Every call site goes through here.
         """
 
-        con = self._connect()
         try:
             with self._db_lock:
-                return con.execute(sql, params or []).fetchall()
+                return self._connect().execute(sql, params or []).fetchall()
         except Exception as err:
             raise GrocerError("grocer.nz data could not be read") from err
 
@@ -219,7 +242,9 @@ class GrocerData:
         """Download to a temporary file, then replace, so a partial write never wins."""
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        temp = target.with_suffix(target.suffix + ".part")
+        # Unique per attempt: two profiles share one mirror directory, so a fixed
+        # ".part" name would let them overwrite each other's download.
+        temp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
         try:
             async with self.session.get(
                 url, timeout=aiohttp.ClientTimeout(total=180)
@@ -234,10 +259,22 @@ class GrocerData:
         except (aiohttp.ClientError, TimeoutError) as err:
             temp.unlink(missing_ok=True)
             raise GrocerError("grocer.nz download failed") from err
+        except OSError as err:
+            # Disk full, permission denied, and similar: never leave a .part.
+            temp.unlink(missing_ok=True)
+            raise GrocerError("grocer.nz download could not be written") from err
         except GrocerError:
             temp.unlink(missing_ok=True)
             raise
-        temp.replace(target)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+        try:
+            temp.replace(target)
+        except OSError as err:
+            temp.unlink(missing_ok=True)
+            raise GrocerError("grocer.nz mirror could not be replaced") from err
+        self._mirror_bytes = None
         return size
 
     # -- catalogue --------------------------------------------------------
@@ -254,6 +291,10 @@ class GrocerData:
                 return False
             self._catalogue = None
             self._stores = None
+            self._store_prices.clear()
+            # The replaced file has a new inode; a live handle would keep serving
+            # the old one.
+            self._close_connection()
             return True
 
     def _ensure_catalogue(self) -> None:
@@ -261,16 +302,21 @@ class GrocerData:
             return
         products = self._query("select id, name, brand, size from public_products")
         stores = self._query("select id, name from public_stores")
-        self._catalogue = {
-            int(pid): GrocerProduct(
-                int(pid),
-                str(name or ""),
-                str(brand or ""),
-                "" if size is None else str(size),
-            )
-            for pid, name, brand, size in products
-        }
-        self._stores = {int(sid): str(name) for sid, name in stores}
+        try:
+            catalogue = {
+                int(pid): GrocerProduct(
+                    int(pid),
+                    str(name or ""),
+                    str(brand or ""),
+                    "" if size is None else str(size),
+                )
+                for pid, name, brand, size in products
+            }
+            store_map = {int(sid): str(name) for sid, name in stores}
+        except (TypeError, ValueError) as err:
+            raise GrocerError("grocer.nz catalogue was malformed") from err
+        self._catalogue = catalogue
+        self._stores = store_map
 
     def stores(self) -> dict[int, str]:
         self._ensure_catalogue()
@@ -318,6 +364,15 @@ class GrocerData:
 
         if store_id in self._store_prices:
             return self._store_prices[store_id]
+        # A store removed from the catalogue must not keep serving an old mirror,
+        # or its stale prices and history would still be imported.
+        try:
+            known = self.stores()
+        except GrocerError:
+            known = {}
+        if known and store_id not in known:
+            _LOGGER.debug("grocer.nz no longer lists this store")
+            return {}
         path = self._dir / f"prices_{store_id}.parquet"
         if not path.exists():
             return {}
@@ -451,23 +506,52 @@ class GrocerData:
 
     # -- housekeeping -----------------------------------------------------
 
-    def mirrored_bytes(self) -> int:
+    def _scan_mirrored_bytes(self) -> int:
+        """Filesystem walk; only call from an executor thread."""
+
         if not self._dir.exists():
             return 0
         return sum(p.stat().st_size for p in self._dir.glob("*") if p.is_file())
 
-    def prune_history(self, keep_products: set[int]) -> int:
-        """Delete mirrored history for products no longer on any list."""
+    async def async_mirrored_bytes(self) -> int:
+        """Mirror size for diagnostics, measured off the event loop."""
+
+        if self._mirror_bytes is None:
+            self._mirror_bytes = await self.hass.async_add_executor_job(
+                self._scan_mirrored_bytes
+            )
+        return self._mirror_bytes
+
+    def prune_history(self, keep_products: set[int], maximum: int) -> int:
+        """Trim mirrored history files down to ``maximum``.
+
+        History is kept deliberately, so this never prunes by list membership: it
+        only bounds total size, dropping the least recently touched files first.
+        Products still on a list are always spared.
+        """
 
         if not self._dir.exists():
             return 0
+        files = sorted(
+            (
+                (path.stat().st_mtime, path)
+                for path in self._dir.glob("history_*.parquet")
+                if path.is_file()
+            ),
+            key=lambda item: item[0],
+        )
         removed = 0
-        for path in self._dir.glob("history_*.parquet"):
+        for _mtime, path in files:
+            if len(files) - removed <= maximum:
+                break
             try:
                 product_id = int(path.stem.split("_", 1)[1])
             except (IndexError, ValueError):
+                product_id = -1
+            if product_id in keep_products:
                 continue
-            if product_id not in keep_products:
-                path.unlink(missing_ok=True)
-                removed += 1
+            path.unlink(missing_ok=True)
+            removed += 1
+        if removed:
+            self._mirror_bytes = None
         return removed

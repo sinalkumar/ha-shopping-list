@@ -28,6 +28,7 @@ from .const import (
     CONF_PRICE_STORE_ID,
     DOMAIN,
     GROCER_CATALOGUE_REFRESH_HOURS,
+    GROCER_HISTORY_FILE_MAX,
     GROCER_STORE_REFRESH_HOURS,
     PRICE_CONCURRENCY,
     PRICE_FAILURE_BACKOFF_SECONDS,
@@ -209,8 +210,11 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         # Products whose history has already been imported, so a backfill runs
         # once per product rather than on every refresh.
         self._backfilled: set[str] = set()
+        self._backfill_attempts: set[str] = set()
+        self._matched_products: set[int] = set()
         self._last_catalogue_sync = 0.0
         self._last_store_sync = 0.0
+        self._mirror_bytes: int | None = None
         self._price_store = PriceStore(hass, entry.entry_id)
         self._unsub_listener: CALLBACK_TYPE | None = None
         super().__init__(
@@ -273,6 +277,23 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                     self._last_store_sync = now
         except GrocerError as err:
             _LOGGER.debug("grocer.nz sync failed: %s", err)
+        if self.history_enabled:
+            # Persist the sync timestamps, otherwise a profile that has not
+            # matched anything yet re-downloads the catalogue on every restart.
+            await self._async_persist()
+            self._mirror_bytes = await self.grocer.async_mirrored_bytes()
+            # Bound the mirror so history is kept without growing forever.
+            keep = await self.hass.async_add_executor_job(self._retained_products)
+            trimmed = await self.hass.async_add_executor_job(
+                self.grocer.prune_history, keep, GROCER_HISTORY_FILE_MAX
+            )
+            if trimmed:
+                _LOGGER.debug("Trimmed %s mirrored history file(s)", trimmed)
+
+    def _retained_products(self) -> set[int]:
+        """Products still worth keeping history for: those on the current list."""
+
+        return set(self._matched_products)
 
     async def _async_backfill(self, key: str, quote: PriceQuote) -> None:
         """Import multi-year history for a validated grocer.nz match.
@@ -285,9 +306,13 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             not self.history_enabled
             or self.grocer_store_id is None
             or key in self._backfilled
+            or key in self._backfill_attempts
         ):
             return
-        self._backfilled.add(key)
+        # Tracked separately from _backfilled: a transient failure must be
+        # retried, while a definitive "no match" or a successful import should
+        # not be attempted again.
+        self._backfill_attempts.add(key)
         try:
             match = await self.grocer.async_match_with_history(
                 self.grocer_store_id, quote.product_name, quote.price
@@ -295,7 +320,13 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         except GrocerError as err:
             _LOGGER.debug("grocer.nz match failed: %s", err)
             return
-        if match is None or not match.history:
+        finally:
+            self._backfill_attempts.discard(key)
+        if match is None:
+            # Definitive: this product is not in the catalogue, so stop asking.
+            self._backfilled.add(key)
+            return
+        if not match.history:
             return
         imported = [
             PricePoint(ts, price)
@@ -310,6 +341,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         else:
             combined = imported
         self._snapshot.history[key] = combined[-PRICE_HISTORY_MAX_POINTS:]
+        self._matched_products.add(match.product.product_id)
+        self._backfilled.add(key)
         _LOGGER.debug(
             "Imported %s historical price point(s) for one item", len(imported)
         )
@@ -733,6 +766,6 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "items_with_history": len(self._snapshot.history),
             "grocer_history": self.history_enabled,
             "grocer_mirror_bytes": (
-                self.grocer.mirrored_bytes() if self.history_enabled else 0
+                self._mirror_bytes if self._mirror_bytes is not None else 0
             ),
         }
