@@ -62,6 +62,7 @@ class RouteCoordinator:
         self._retry_after: dict[str, float] = {}
         self._save_handle: asyncio.TimerHandle | None = None
         self._save_tasks: set[asyncio.Task[Any]] = set()
+        self._price_task: asyncio.Task[Any] | None = None
         self._unsub_final_write: CALLBACK_TYPE | None = None
         self._closed = False
 
@@ -207,7 +208,7 @@ class RouteCoordinator:
     def _request_prices(self) -> None:
         """Price newly seen items without blocking the route update."""
 
-        if not self.prices.enabled:
+        if not self.prices.enabled or self._closed or self._price_task is not None:
             return
         task = self.entry.async_create_background_task(
             self.hass,
@@ -215,10 +216,16 @@ class RouteCoordinator:
             f"price shopping route items for {self.entry.entry_id}",
         )
         self._tasks.add(task)
+        self._price_task = task
         task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._clear_price_task)
+
+    @callback
+    def _clear_price_task(self, _task: asyncio.Task[Any]) -> None:
+        self._price_task = None
 
     async def _async_price_then_notify(self) -> None:
-        await self.prices.async_refresh()
+        await self.prices.async_refresh(force=False)
         self._notify_prices()
 
     @callback

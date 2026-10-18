@@ -134,7 +134,9 @@ Two kinds of request leave Home Assistant, both with the minimum data needed.
 
 **To the chosen supermarket**, only when a price source is enabled: the item summary, as a product search term. This is opt-in per profile, and choosing **No prices** keeps item names away from retailers entirely.
 
-No other Home Assistant state, location, history, credentials, or network information is sent to either. Price lookups are anonymous: no account, no login, no cookies are stored, and nothing about your basket is written to the retailer.
+No other Home Assistant state, history, or credentials are sent to either. Price lookups are anonymous: no account and no login, they run in a dedicated session with a dummy cookie jar so retailer cookies are discarded, and nothing about your basket is written to the retailer.
+
+For Pak'nSave the chosen store ID is sent with each lookup, because prices are per store. That identifies which store you shop at, so use **No prices** or Woolworths if you would rather not share it.
 
 Locally, the profile cache persists normalized item summaries and their sections in Home Assistant storage (`.storage/smart_shopping_route.cache.<entry_id>`) so classification is not repeated. That file is local user data and is deleted when the config entry is removed. Prices are held in memory only. Diagnostics contain counts and feature flags only, never item text, UIDs, product names, profile names, entity IDs, or hints. Logs never include item summaries.
 

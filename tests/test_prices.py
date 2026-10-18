@@ -311,7 +311,11 @@ def fake_entry():
     """Minimal config entry: the coordinator only registers an unload callback."""
 
     return SimpleNamespace(
-        entry_id="e1", title="Shop", data={}, async_on_unload=lambda _cb: None
+        entry_id="e1",
+        title="Shop",
+        data={},
+        async_on_unload=lambda _cb: None,
+        pref_disable_polling=False,
     )
 
 
@@ -373,7 +377,9 @@ def test_totals_and_specials(monkeypatch) -> None:
 
     snapshot = coordinator.snapshot
     assert snapshot.total == 12.5
-    assert [q.product_name for q in snapshot.specials] == ["Anchor Butter 500g"]
+    assert [quote.product_name for _key, quote in snapshot.specials] == [
+        "Anchor Butter 500g"
+    ]
     assert snapshot.savings == 1.2
     assert coordinator.quote_for("Butter") is not None
     assert coordinator.quote_for("Unlisted") is None
@@ -426,3 +432,249 @@ def test_disabled_pricing_makes_no_requests(monkeypatch) -> None:
 
     assert coordinator.enabled is False
     assert asyncio.run(coordinator._async_update_data()).quotes == {}
+
+
+# --- basket accounting ------------------------------------------------------
+
+
+def test_duplicate_summaries_count_at_their_real_quantity(monkeypatch) -> None:
+    """Two 'Milk' entries are two purchases, not one."""
+
+    coordinator, calls = make_price_coordinator(
+        monkeypatch,
+        ["Milk", "Milk", "Bread"],
+        {"Milk": quote("Milk 2L", 4.0), "Bread": quote("Bread 600g", 3.5)},
+    )
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.snapshot.total == 11.5
+    assert coordinator.snapshot.priced_count == 3
+    # One request per distinct summary, not per item.
+    assert sorted(calls) == ["Bread", "Milk"]
+
+
+def test_removed_items_stop_counting_and_are_pruned(monkeypatch) -> None:
+    summaries = ["Milk", "Bread"]
+    coordinator, _calls = make_price_coordinator(
+        monkeypatch,
+        summaries,
+        {"Milk": quote("Milk 2L", 4.0), "Bread": quote("Bread 600g", 3.5)},
+    )
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.snapshot.total == 7.5
+
+    summaries.remove("Bread")
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.snapshot.total == 4.0
+    assert coordinator.snapshot.quotes.keys() == {"milk"}
+
+
+def test_completed_items_stop_counting(monkeypatch) -> None:
+    """The coordinator only asks for incomplete items, so completed ones drop out."""
+
+    summaries = ["Milk", "Bread"]
+    coordinator, _calls = make_price_coordinator(
+        monkeypatch,
+        summaries,
+        {"Milk": quote("Milk 2L", 4.0), "Bread": quote("Bread 600g", 3.5)},
+    )
+    asyncio.run(coordinator._async_update_data())
+
+    summaries.remove("Milk")  # what the route coordinator reports once completed
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.snapshot.total == 3.5
+    assert coordinator.quote_for("Milk") is None
+
+
+def test_specials_savings_scale_with_quantity(monkeypatch) -> None:
+    coordinator, _calls = make_price_coordinator(
+        monkeypatch,
+        ["Butter", "Butter"],
+        {"Butter": quote("Anchor Butter 500g", 8.5, 9.7)},
+    )
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.snapshot.savings == 2.4
+    assert len(coordinator.snapshot.specials) == 1
+
+
+# --- failure reporting ------------------------------------------------------
+
+
+def test_all_transport_failures_raise_update_failed(monkeypatch) -> None:
+    """An outage must be visible, not silently reported as zero failures."""
+
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    class FailingClient:
+        async def async_lookup(self, _summary):
+            raise PriceError("down")
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Milk"]
+    )
+    coordinator._client = FailingClient()
+
+    with pytest.raises(UpdateFailed):
+        asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.as_diagnostics()["scheduled_retries"] == 1
+
+
+def test_partial_transport_failure_does_not_raise(monkeypatch) -> None:
+    class MixedClient:
+        async def async_lookup(self, summary):
+            if summary == "Milk":
+                raise PriceError("down")
+            return quote("Bread 600g", 3.5)
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Milk", "Bread"]
+    )
+    coordinator._client = MixedClient()
+
+    snapshot = asyncio.run(coordinator._async_update_data())
+
+    assert snapshot.total == 3.5
+
+
+def test_no_match_is_not_a_transport_failure(monkeypatch) -> None:
+    """An unstocked item is a normal outcome, not a degraded connection."""
+
+    coordinator, _calls = make_price_coordinator(monkeypatch, ["Kids vitamins"], {})
+
+    snapshot = asyncio.run(coordinator._async_update_data())
+
+    assert snapshot.total == 0.0
+    assert snapshot.unmatched_count == 1
+    assert coordinator.as_diagnostics()["unmatched_items"] == 1
+
+
+# --- history ----------------------------------------------------------------
+
+
+def test_previous_price_records_the_old_value(monkeypatch) -> None:
+    """Regression: the new price was being recorded as the previous price."""
+
+    coordinator, _calls = make_price_coordinator(
+        monkeypatch, ["Butter"], {"Butter": quote("Butter 500g", 9.0)}
+    )
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.cheapest_seen_for("Butter") == 9.0
+
+    coordinator._client.async_lookup = lambda _s: _return(quote("Butter 500g", 7.5))
+    asyncio.run(coordinator.async_refresh())
+
+    assert coordinator.snapshot.previous["butter"] == 9.0
+    assert coordinator.cheapest_seen_for("Butter") == 7.5
+
+
+# --- lifecycle --------------------------------------------------------------
+
+
+def test_setup_registers_an_interval_listener(monkeypatch) -> None:
+    """Without a listener the 12-hour refresh never runs."""
+
+    monkeypatch.setattr(
+        price_coordinator, "create_client", lambda *_a, **_k: SimpleNamespace()
+    )
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(loop=asyncio.new_event_loop()),
+        fake_entry(),
+        summaries=lambda: ["Milk"],
+    )
+
+    coordinator.async_setup()
+
+    assert coordinator._unsub_listener is not None
+
+
+def test_shutdown_cancels_an_in_flight_refresh(monkeypatch) -> None:
+    """A slow retailer must not mutate the snapshot after unload."""
+
+    started = asyncio.Event()
+    cancelled = False
+
+    class SlowClient:
+        async def async_lookup(self, _summary):
+            nonlocal cancelled
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            return quote("Milk 2L", 4.0)
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Milk"]
+    )
+    coordinator._client = SlowClient()
+
+    async def scenario() -> None:
+        refresh = asyncio.create_task(coordinator.async_refresh())
+        await started.wait()
+        await coordinator.async_shutdown()
+        await asyncio.gather(refresh, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    assert cancelled is True
+    assert coordinator.snapshot.quotes == {}
+
+
+def test_refresh_after_shutdown_does_nothing(monkeypatch) -> None:
+    coordinator, calls = make_price_coordinator(
+        monkeypatch, ["Milk"], {"Milk": quote("Milk 2L", 4.0)}
+    )
+    asyncio.run(coordinator.async_shutdown())
+
+    asyncio.run(coordinator.async_refresh())
+
+    assert calls == []
+
+
+def test_forced_refresh_reprices_existing_items(monkeypatch) -> None:
+    """A cached quote must still be refreshed on the slow interval.
+
+    The interval path sets the same flag this test sets, so a cached quote
+    cannot live forever while prices change at the retailer.
+    """
+
+    prices = {"Butter": 9.0}
+
+    class MovingClient:
+        async def async_lookup(self, _summary):
+            return quote("Butter 500g", prices["Butter"])
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(is_stopping=lambda: False, state=None),
+        fake_entry(),
+        summaries=lambda: ["Butter"],
+    )
+    coordinator._client = MovingClient()
+
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.snapshot.total == 9.0
+
+    prices["Butter"] = 7.5
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.snapshot.total == 7.5
+
+
+def test_source_push_does_not_repice_known_items(monkeypatch) -> None:
+    """The incremental path stays one request per new item."""
+
+    coordinator, calls = make_price_coordinator(
+        monkeypatch, ["Butter"], {"Butter": quote("Butter 500g", 9.0)}
+    )
+    asyncio.run(coordinator._async_update_data())
+    asyncio.run(coordinator._async_update_data())
+
+    assert calls == ["Butter"]

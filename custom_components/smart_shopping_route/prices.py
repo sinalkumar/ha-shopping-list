@@ -20,7 +20,7 @@ from typing import Any
 
 import aiohttp
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -203,10 +203,17 @@ class PriceClient:
 
     @property
     def session(self) -> aiohttp.ClientSession:
-        """Resolve the shared session lazily so construction stays hass-free."""
+        """Resolve a cookie-free session lazily so construction stays hass-free.
+
+        A dedicated session with a dummy cookie jar keeps the documented claim
+        that price lookups store nothing: the shared Home Assistant session
+        would retain whatever cookies the retailers set.
+        """
 
         if self._session is None:
-            self._session = async_get_clientsession(self.hass)
+            self._session = async_create_clientsession(
+                self.hass, cookie_jar=aiohttp.DummyCookieJar()
+            )
         return self._session
 
     async def async_candidates(self, term: str) -> list[PriceQuote]:
@@ -431,11 +438,18 @@ async def async_list_paknsave_stores(
     except (TimeoutError, aiohttp.ClientError, ValueError) as err:
         raise PriceError("Pak'nSave store list failed") from err
 
-    return {
-        str(store["id"]): str(store["name"])
-        for store in body.get("stores") or []
-        if store.get("id") and store.get("name")
-    }
+    stores = body.get("stores") if isinstance(body, dict) else None
+    if not isinstance(stores, list):
+        raise PriceError("Pak'nSave store list was malformed")
+    listing: dict[str, str] = {}
+    for store in stores:
+        if not isinstance(store, dict):
+            continue
+        store_id = store.get("id")
+        store_name = store.get("name")
+        if store_id and store_name:
+            listing[str(store_id)] = str(store_name)
+    return listing
 
 
 def create_client(

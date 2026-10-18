@@ -114,8 +114,8 @@ class BasketTotalSensor(RouteSensor):
         snapshot = self.coordinator.prices.snapshot
         return {
             "chain": self.coordinator.prices.chain,
-            "priced_items": len(snapshot.quotes),
-            "unmatched_items": len(snapshot.failed),
+            "priced_items": snapshot.priced_count,
+            "unmatched_items": snapshot.unmatched_count,
             "special_savings": snapshot.savings,
         }
 
@@ -149,15 +149,14 @@ class SpecialsSensor(RouteSensor):
         return {
             "items": [
                 {
-                    "summary": summary,
+                    "summary": key,
                     "product": quote.product_name,
                     "price": quote.price,
                     "was_price": quote.was_price,
                     "savings": quote.savings,
                     "valid_until": quote.valid_until,
                 }
-                for summary, quote in snapshot.quotes.items()
-                if quote.is_special
+                for key, quote in snapshot.specials
             ],
             "total_savings": snapshot.savings,
         }
