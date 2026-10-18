@@ -24,27 +24,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import threading
 import uuid
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
 
 import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import GROCER_MIRROR_DIR
+from .parquet import ParquetError, read_columns
 
 _LOGGER = logging.getLogger(__name__)
 
 ASSET_BASE = "https://assets-prod.grocer.nz/public"
-CATALOGUE_URL = f"{ASSET_BASE}/base_v3.duckdb.br"
 STORE_PRICES_URL = f"{ASSET_BASE}/prices_per_store_v3/public_prices_{{store}}.parquet"
 PRODUCT_HISTORY_URL = f"{ASSET_BASE}/price_history_v3/price_history_{{product}}.parquet"
 
-CATALOGUE_FILE = "base_v3.duckdb"
+# Product names come from grocer.nz's own search service rather than the DuckDB
+# catalogue: it is a plain HTTP call with no compiled dependency, and it ranks
+# results, which matters because a flat catalogue scan is much worse at guessing
+# what "Strawberries" means. This is the public search key the web app ships.
+SEARCH_URL = "https://meilisearch.grocer.nz/indexes/products/search"
+SEARCH_KEY = "7f58239330307ec585c86863f985ab83cbb9ce951a9601c66e158548fb632fd1"
 # A price match must be within this many cents to count as the same product.
 PRICE_TOLERANCE = 0.02
 # Minimum name similarity before a candidate is even considered.
@@ -115,6 +118,7 @@ class GrocerProduct:
     name: str
     brand: str = ""
     size: str = ""
+    stores: set[int] | None = None
 
     @property
     def label(self) -> str:
@@ -158,15 +162,12 @@ class GrocerData:
         self.hass = hass
         self._dir = Path(hass.config.path(GROCER_MIRROR_DIR))
         self._session: aiohttp.ClientSession | None = None
-        self._duckdb: Any = None
         self._catalogue: dict[int, GrocerProduct] | None = None
         self._stores: dict[int, str] | None = None
         self._store_prices: dict[int, dict[int, GrocerPrice]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        # Every query runs in an executor thread, and a duckdb connection is not
-        # safe for concurrent use from several threads: doing so returns
-        # malformed result sets rather than raising. All access is serialised.
-        self._db_lock = threading.Lock()
+        # Parquet reads run in executor threads and are pure Python, so they are
+        # safe to run concurrently; no shared database handle exists any more.
         self._mirror_bytes: int | None = None
 
     # -- infrastructure ---------------------------------------------------
@@ -182,61 +183,54 @@ class GrocerData:
 
     @staticmethod
     def duckdb_available() -> bool:
-        """grocer.nz data needs duckdb; the integration works without it."""
+        """Kept for callers; reading no longer needs any third-party package."""
 
-        try:
-            import duckdb  # noqa: F401
-        except ImportError:
-            return False
         return True
 
-    def _connect(self) -> Any:
-        """Return the shared connection, creating it at most once.
+    async def _async_search(self, query: str) -> list[GrocerProduct]:
+        """Ask grocer.nz's search service for products matching a phrase.
 
-        Creation happens under the same lock as queries: two executor threads
-        arriving together would otherwise build two connections and leak one,
-        and the catalogue can be replaced underneath a live handle.
+        This replaces reading the DuckDB catalogue, which needed a compiled
+        dependency with no Home Assistant OS wheels. Search also ranks results by
+        popularity, which a flat catalogue scan cannot do.
         """
 
-        if self._duckdb is not None:
-            return self._duckdb
+        if not query.strip():
+            return []
+        payload = {"q": query, "limit": 20}
         try:
-            import duckdb
-        except ImportError as err:  # pragma: no cover - import guard
-            raise GrocerError("duckdb is not installed") from err
-        path = self._dir / CATALOGUE_FILE
-        if not path.exists():
-            raise GrocerError("grocer.nz catalogue is not mirrored yet")
-        try:
-            self._duckdb = duckdb.connect(str(path), read_only=True)
-        except Exception as err:
-            raise GrocerError("grocer.nz catalogue could not be opened") from err
-        return self._duckdb
+            async with self.session.post(
+                SEARCH_URL,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {SEARCH_KEY}",
+                    "content-type": "application/json",
+                },
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as response:
+                if response.status != 200:
+                    raise GrocerError(f"grocer.nz search returned {response.status}")
+                body = await response.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            raise GrocerError("grocer.nz search failed") from err
 
-    def _close_connection(self) -> None:
-        """Drop the open handle so the next query reopens the new file."""
+        products: list[GrocerProduct] = []
+        for hit in body.get("hits") or []:
+            if not isinstance(hit, dict) or hit.get("id") is None:
+                continue
+            stores = hit.get("stores")
+            products.append(
+                GrocerProduct(
+                    int(hit["id"]),
+                    str(hit.get("name") or ""),
+                    str(hit.get("brand") or ""),
+                    "" if hit.get("size") is None else str(hit["size"]),
+                    {int(s) for s in stores} if isinstance(stores, list) else None,
+                )
+            )
+        return products
 
-        with self._db_lock:
-            connection, self._duckdb = self._duckdb, None
-            if connection is not None:
-                try:
-                    connection.close()
-                except Exception:
-                    pass
-
-    def _query(self, sql: str, params: list | None = None) -> list[tuple]:
-        """Run one query, serialised against every other query.
-
-        A duckdb connection cannot be shared between threads: concurrent use
-        returns malformed result sets instead of raising, which silently
-        corrupts matches. Every call site goes through here.
-        """
-
-        try:
-            with self._db_lock:
-                return self._connect().execute(sql, params or []).fetchall()
-        except Exception as err:
-            raise GrocerError("grocer.nz data could not be read") from err
+    # -- per-store prices -------------------------------------------------
 
     async def _async_download(self, url: str, target: Path) -> int:
         """Download to a temporary file, then replace, so a partial write never wins."""
@@ -277,75 +271,6 @@ class GrocerData:
         self._mirror_bytes = None
         return size
 
-    # -- catalogue --------------------------------------------------------
-
-    async def async_sync_catalogue(self) -> bool:
-        """Mirror the catalogue. Returns whether a fresh copy was fetched."""
-
-        async with self._lock("catalogue"):
-            try:
-                await self._async_download(CATALOGUE_URL, self._dir / CATALOGUE_FILE)
-            except GrocerError as err:
-                # Keep serving the mirrored copy; history is the point of this.
-                _LOGGER.debug("grocer.nz catalogue sync failed: %s", err)
-                return False
-            self._catalogue = None
-            self._stores = None
-            self._store_prices.clear()
-            # The replaced file has a new inode; a live handle would keep serving
-            # the old one.
-            self._close_connection()
-            return True
-
-    def _ensure_catalogue(self) -> None:
-        if self._catalogue is not None and self._stores is not None:
-            return
-        products = self._query("select id, name, brand, size from public_products")
-        stores = self._query("select id, name from public_stores")
-        try:
-            catalogue = {
-                int(pid): GrocerProduct(
-                    int(pid),
-                    str(name or ""),
-                    str(brand or ""),
-                    "" if size is None else str(size),
-                )
-                for pid, name, brand, size in products
-            }
-            store_map = {int(sid): str(name) for sid, name in stores}
-        except (TypeError, ValueError) as err:
-            raise GrocerError("grocer.nz catalogue was malformed") from err
-        self._catalogue = catalogue
-        self._stores = store_map
-
-    def stores(self) -> dict[int, str]:
-        self._ensure_catalogue()
-        assert self._stores is not None
-        return dict(self._stores)
-
-    def resolve_store(self, wanted: str) -> int | None:
-        """Find a store id by name, tolerating punctuation and banner style.
-
-        The catalogue writes "PAK'nSAVE Ormiston" while people write
-        "PakNSave Ormiston", so apostrophes and case must not matter.
-        """
-
-        key = _normalise(wanted)
-        if not key:
-            return None
-        stores = self.stores()
-        for store_id, name in stores.items():
-            if _normalise(name) == key:
-                return store_id
-        partial = [
-            store_id for store_id, name in stores.items() if key in _normalise(name)
-        ]
-        if len(partial) == 1:
-            return partial[0]
-        return None
-
-    # -- per-store prices -------------------------------------------------
-
     async def async_sync_store_prices(self, store_id: int) -> bool:
         async with self._lock(f"store-{store_id}"):
             target = self._dir / f"prices_{store_id}.parquet"
@@ -364,22 +289,24 @@ class GrocerData:
 
         if store_id in self._store_prices:
             return self._store_prices[store_id]
-        # A store removed from the catalogue must not keep serving an old mirror,
-        # or its stale prices and history would still be imported.
-        try:
-            known = self.stores()
-        except GrocerError:
-            known = {}
-        if known and store_id not in known:
-            _LOGGER.debug("grocer.nz no longer lists this store")
-            return {}
         path = self._dir / f"prices_{store_id}.parquet"
         if not path.exists():
             return {}
-        rows = self._query(
-            "select product_id, original_price_cent, sale_price_cent, updated_at"
-            " from read_parquet(?)",
-            [str(path)],
+        try:
+            columns = read_columns(
+                str(path),
+                ["product_id", "original_price_cent", "sale_price_cent", "updated_at"],
+            )
+        except ParquetError as err:
+            raise GrocerError("grocer.nz store prices could not be read") from err
+        rows = list(
+            zip(
+                columns["product_id"],
+                columns["original_price_cent"],
+                columns["sale_price_cent"],
+                columns["updated_at"],
+                strict=False,
+            )
         )
         prices: dict[int, GrocerPrice] = {}
         for product_id, regular, sale, updated in rows:
@@ -418,24 +345,35 @@ class GrocerData:
         path = self._dir / f"history_{product_id}.parquet"
         if not path.exists():
             return []
-        rows = self._query(
-            "select updated_at, price_cent from read_parquet(?)"
-            " where store_id = ? order by updated_at",
-            [str(path), store_id],
-        )
+        try:
+            columns = read_columns(str(path), ["updated_at", "store_id", "price_cent"])
+        except ParquetError as err:
+            raise GrocerError("grocer.nz history could not be read") from err
+        rows = [
+            (when, cents)
+            for when, row_store, cents in zip(
+                columns["updated_at"],
+                columns["store_id"],
+                columns["price_cent"],
+                strict=False,
+            )
+            if row_store == store_id
+        ]
         series: list[tuple[float, float]] = []
         for when, cents in rows:
             if when is None or cents is None:
                 continue
             try:
-                series.append((when.timestamp(), round(float(cents) / 100, 2)))
-            except (AttributeError, ValueError, OSError):
+                # updated_at is epoch milliseconds in the parquet file.
+                series.append((int(when) / 1000, round(float(cents) / 100, 2)))
+            except (TypeError, ValueError):
                 continue
+        series.sort(key=lambda point: point[0])
         return series
 
     # -- matching ---------------------------------------------------------
 
-    def match(
+    async def async_match(
         self,
         store_id: int,
         name: str,
@@ -446,43 +384,47 @@ class GrocerData:
         """Find the catalogue product behind a retailer's resolved product.
 
         A name match alone is not trusted: the candidate's price must agree with
-        the price the retailer just quoted, either its regular or its sale
-        price. That makes an otherwise ambiguous name match self-validating, and
-        it is why this can safely import history rather than merely guess.
+        the price the retailer just quoted, either its regular or its sale price.
+        That makes an otherwise ambiguous name match self-validating, and it is
+        why this can safely import history rather than merely guess.
         """
 
         if price is None:
             return None
-        prices = self.store_prices(store_id)
+        prices = await self.hass.async_add_executor_job(self.store_prices, store_id)
         if not prices:
             return None
-        self._ensure_catalogue()
-        assert self._catalogue is not None
         target = _normalise(name)
         if not target:
             return None
 
-        candidates: list[tuple[float, GrocerProduct]] = []
-        for product_id in prices:
-            product = self._catalogue.get(product_id)
-            if product is None:
+        products = await self._async_search(name)
+        scored: list[tuple[float, GrocerProduct]] = []
+        for product in products:
+            if product.product_id not in prices:
+                continue
+            if product.stores is not None and store_id not in product.stores:
                 continue
             if not _sizes_compatible(name, product.label):
                 continue
             ratio = SequenceMatcher(None, target, _normalise(product.label)).ratio()
             if ratio >= MIN_NAME_RATIO:
-                candidates.append((ratio, product))
-        candidates.sort(key=lambda item: item[0], reverse=True)
+                scored.append((ratio, product))
+        # Search already ranks by popularity, so ties keep that order.
+        scored.sort(key=lambda item: item[0], reverse=True)
 
-        for ratio, product in candidates[:25]:
+        for ratio, product in scored[:25]:
             row = prices[product.product_id]
             if abs(row.regular - price) <= tolerance or (
                 row.sale is not None and abs(row.sale - price) <= tolerance
             ):
+                history = await self.hass.async_add_executor_job(
+                    self.history, product.product_id, store_id
+                )
                 return GrocerMatch(
                     product=product,
                     price=row,
-                    history=self.history(product.product_id, store_id),
+                    history=history,
                     name_ratio=ratio,
                 )
         return None
@@ -492,16 +434,13 @@ class GrocerData:
     ) -> GrocerMatch | None:
         """Match, ensuring the history file is mirrored first."""
 
-        match = await self.hass.async_add_executor_job(
-            self.match, store_id, name, price
-        )
+        match = await self.async_match(store_id, name, price)
         if match is None:
             return None
         if not match.history:
-            await self.async_sync_history(match.product.product_id)
-            match = await self.hass.async_add_executor_job(
-                self.match, store_id, name, price
-            )
+            if not await self.async_sync_history(match.product.product_id):
+                return match
+            match = await self.async_match(store_id, name, price)
         return match
 
     # -- housekeeping -----------------------------------------------------

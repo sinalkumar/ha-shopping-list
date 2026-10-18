@@ -134,7 +134,7 @@ Pins are per profile and per chain, because each retailer has its own catalogue.
 
 ### Multi-year history from grocer.nz
 
-[grocer.nz](https://grocer.nz) publishes its New Zealand grocery dataset as public, unauthenticated files. Set **Price history store** while configuring to use it:
+[grocer.nz](https://grocer.nz) publishes its New Zealand grocery dataset as public, unauthenticated files. Set **grocer.nz store ID** while configuring to use it — the number in the store's URL on grocer.nz (for example `228` is PAK'nSAVE Ormiston):
 
 | What it gives | Why it matters |
 |---|---|
@@ -142,7 +142,7 @@ Pins are per profile and per chain, because each retailer has its own catalogue.
 | Sale prices for Woolworths (29% of their catalogue) | Cross-checks the retailer's own was-price |
 | A store catalogue across 6 banners and 475 stores | Resolves store names, and compares across chains |
 
-The catalogue (about 7 MB) is mirrored to `.storage/smart_shopping_route/grocer/`, refreshed weekly; your store's price file is refreshed every 12 hours. **The mirror is deliberate:** if grocer.nz is unreachable the integration keeps using the local copy, and the history it already downloaded is never thrown away.
+Data is mirrored to `.storage/smart_shopping_route/grocer/`: your store's price file and each matched product's history file, refreshed every 12 hours. **The mirror is deliberate:** if grocer.nz is unreachable the integration keeps using the local copy, and the history it already downloaded is never thrown away.
 
 History is imported only when the match is **self-validating**: the catalogue product's price must agree with the price the retailer just quoted, either its regular or its sale price. A name that merely looks similar is not enough, so another product's history cannot be attached to your item. Once imported, a series looks like this:
 

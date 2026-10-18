@@ -27,7 +27,6 @@ from .const import (
     CONF_PRICE_CHAIN,
     CONF_PRICE_STORE_ID,
     DOMAIN,
-    GROCER_CATALOGUE_REFRESH_HOURS,
     GROCER_HISTORY_FILE_MAX,
     GROCER_STORE_REFRESH_HOURS,
     PRICE_CONCURRENCY,
@@ -212,7 +211,6 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._backfilled: set[str] = set()
         self._backfill_attempts: set[str] = set()
         self._matched_products: set[int] = set()
-        self._last_catalogue_sync = 0.0
         self._last_store_sync = 0.0
         self._mirror_bytes: int | None = None
         self._price_store = PriceStore(hass, entry.entry_id)
@@ -253,22 +251,15 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
     async def async_sync_grocer(self, *, force: bool = False) -> None:
         """Mirror the catalogue and this store's prices, tolerating failure.
 
-        Both are refreshed on their own slow schedule rather than every time, so
-        a restart does not re-download the catalogue. A failure leaves the
-        existing mirror in place, which is the point of keeping one.
+        Refreshed on its own slow schedule rather than every time, so a restart
+        does not re-download it. A failure leaves the existing mirror in place,
+        which is the point of keeping one.
         """
 
         if not self.history_enabled or self.grocer_store_id is None:
             return
         now = time.time()
         try:
-            if (
-                force
-                or now - self._last_catalogue_sync
-                >= GROCER_CATALOGUE_REFRESH_HOURS * 3600
-            ):
-                if await self.grocer.async_sync_catalogue():
-                    self._last_catalogue_sync = now
             if (
                 force
                 or now - self._last_store_sync >= GROCER_STORE_REFRESH_HOURS * 3600
@@ -279,7 +270,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             _LOGGER.debug("grocer.nz sync failed: %s", err)
         if self.history_enabled:
             # Persist the sync timestamps, otherwise a profile that has not
-            # matched anything yet re-downloads the catalogue on every restart.
+            # matched anything yet re-downloads on every restart.
             await self._async_persist()
             self._mirror_bytes = await self.grocer.async_mirrored_bytes()
             # Bound the mirror so history is kept without growing forever.
@@ -406,10 +397,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 continue
             self._pins[key] = ProductPin.from_dict(self._chain_key, value)
         grocer = data.get("grocer") if isinstance(data.get("grocer"), dict) else {}
-        for attr, key in (
-            ("_last_catalogue_sync", "catalogue_at"),
-            ("_last_store_sync", "store_at"),
-        ):
+        for attr, key in (("_last_store_sync", "store_at"),):
             value = grocer.get(key)
             if isinstance(value, (int, float)):
                 setattr(self, attr, float(value))
@@ -440,10 +428,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 key: {"points": [[point.ts, point.price] for point in series]}
                 for key, series in self._snapshot.history.items()
             },
-            "grocer": {
-                "catalogue_at": self._last_catalogue_sync,
-                "store_at": self._last_store_sync,
-            },
+            "grocer": {"store_at": self._last_store_sync},
         })
 
     async def async_pin(

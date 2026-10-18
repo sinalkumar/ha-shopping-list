@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.6.1
+
+### Fixed
+
+- The integration failed to load entirely on Home Assistant OS: `duckdb` was a
+  manifest requirement, HAOS is Alpine/musl, no wheel matched, pip fell back to a
+  source build and failed, so Home Assistant refused to load the integration and
+  the route, classification and sensors all stopped. It is no longer a
+  requirement, and no third-party package is needed at all.
+- Parquet files are now read by a small built-in reader (thrift metadata,
+  definition levels, PLAIN and RLE_DICTIONARY, gzip and the standard-library
+  Zstandard in Python 3.14). Verified byte-for-byte against pyarrow across six
+  real files and 2.9 million rows.
+- Product names come from grocer.nz's search service instead of the DuckDB
+  catalogue, which also ranks results by popularity, so matching is better than
+  the previous flat catalogue scan.
+
+### Changed
+
+- **Price history store** is now the numeric **grocer.nz store ID**, because the
+  store list is rendered in the browser only and resolving names would have
+  needed a dependency.
+
 ## 0.6.0
 
 ### Added

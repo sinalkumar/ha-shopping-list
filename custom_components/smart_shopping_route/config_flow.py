@@ -29,7 +29,6 @@ from .const import (
     DEFAULT_SHOW_COMPLETED,
     DOMAIN,
 )
-from .grocer import GrocerData, GrocerError
 from .models import (
     RouteParseError,
     RouteSection,
@@ -190,30 +189,19 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _async_resolve_grocer_store(
         self, user_input: dict[str, Any]
     ) -> int | None:
-        """Resolve the grocer.nz store used for price history.
+        """Read the grocer.nz store ID for price history.
 
-        Left blank, history is simply unavailable; it is never required, because
-        grocer.nz is a third party and the route works without it.
+        This is a plain number because grocer.nz renders its store list in the
+        browser only, so there is no name lookup that needs no dependency. Left
+        blank, history is unavailable and the integration keeps its own.
         """
 
         wanted = str(user_input.get(CONF_GROCER_STORE_ID) or "").strip()
         if not wanted:
             return None
-        if not GrocerData.duckdb_available():
-            raise ValueError("grocer_unavailable")
-        if wanted.isdigit():
-            return int(wanted)
-        data = GrocerData(self.hass)
-        try:
-            await data.async_sync_catalogue()
-            store_id = await self.hass.async_add_executor_job(
-                data.resolve_store, wanted
-            )
-        except GrocerError as err:
-            raise ValueError("grocer_unavailable") from err
-        if store_id is None:
-            raise ValueError("grocer_store_not_found")
-        return store_id
+        if not wanted.isdigit():
+            raise ValueError("grocer_store_invalid")
+        return int(wanted)
 
     def _name_taken(self, name: str, *, exclude_entry_id: str | None = None) -> bool:
         """Names must be unique because they become entity names.
