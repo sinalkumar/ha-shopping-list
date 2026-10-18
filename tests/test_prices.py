@@ -1582,3 +1582,173 @@ def test_a_failed_refresh_does_not_erase_a_known_drop(monkeypatch) -> None:
         asyncio.run(coordinator._async_update_data())
 
     assert coordinator.snapshot.drop_for("butter") == 1.5
+
+
+# --- size and unit price ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "label", "amount", "unit"),
+    [
+        ("Weet-Bix Cereal 1.2kg", "1.2kg", 1.2, "kg"),
+        ("Anchor Butter 500g", "500g", 0.5, "kg"),
+        ("Musashi Energy Drink 500ml", "500ml", 0.5, "L"),
+        ("Pams Milk 2L", "2L", 2.0, "L"),
+        ("Toilet Paper 12pk", "12pk", 0.0, ""),
+        ("Something Without A Size", None, None, None),
+    ],
+)
+def test_size_is_parsed_from_the_product_name(text, label, amount, unit) -> None:
+    from smart_shopping_route.prices import size_from_text
+
+    parsed = size_from_text(text)
+
+    if label is None:
+        assert parsed is None
+    else:
+        assert parsed == (label, amount, unit)
+
+
+@pytest.mark.parametrize(
+    ("price", "text", "expected"),
+    [
+        (8.96, "Weet-Bix 1.2kg", "$7.47/kg"),
+        (4.00, "Pams Milk 2L", "$2.00/L"),
+        (7.39, "Pure Butter 500g", "$14.78/kg"),
+        (6.59, "Toilet Paper 12pk", None),
+        (5.00, "No Size Here", None),
+    ],
+)
+def test_unit_price_is_computed(price, text, expected) -> None:
+    from smart_shopping_route.prices import compute_unit_price, size_from_text
+
+    assert compute_unit_price(price, size_from_text(text)) == expected
+
+
+def test_retailer_comparative_price_is_preferred() -> None:
+    """Foodstuffs quotes its own per-100g figure, which is what shoppers see."""
+
+    from smart_shopping_route.prices import _comparative_unit_price
+
+    assert (
+        _comparative_unit_price({
+            "pricePerUnit": 148,
+            "unitQuantity": 100,
+            "unitQuantityUom": "g",
+        })
+        == "$1.48/100g"
+    )
+    assert (
+        _comparative_unit_price({
+            "pricePerUnit": 31,
+            "unitQuantity": 100,
+            "unitQuantityUom": "sheets",
+        })
+        == "$0.31/100sheets"
+    )
+    assert _comparative_unit_price({}) is None
+
+
+def test_woolworths_quote_carries_size_and_unit_price() -> None:
+    body = woolworths_body([
+        {
+            "sku": "1",
+            "productName": "Weet-Bix Cereal 1.2kg",
+            "variants": [{"variantPrice": {"sellingPrice": 8.96}}],
+        }
+    ])
+    client = WoolworthsPriceClient(SimpleNamespace())
+    client._session = FakeSession([FakeResponse(200, body)])
+
+    result = asyncio.run(client.async_lookup("weet-bix"))
+
+    assert result is not None
+    assert result.size == "1.2kg"
+    assert result.unit_price == "$7.47/kg"
+
+
+def test_paknsave_quote_uses_the_comparative_price() -> None:
+    token = FakeResponse(200, {"access_token": "anon"})
+    search = FakeResponse(
+        200,
+        {
+            "products": [
+                {
+                    "productId": "p1",
+                    "brand": "Pams",
+                    "name": "Pure Butter 500g",
+                    "singlePrice": {
+                        "price": 739,
+                        "comparativePrice": {
+                            "pricePerUnit": 148,
+                            "unitQuantity": 100,
+                            "unitQuantityUom": "g",
+                        },
+                    },
+                }
+            ]
+        },
+    )
+    client = PakNSavePriceClient(SimpleNamespace(), "store-1")
+    client._session = FakeSession([token, search])
+
+    result = asyncio.run(client.async_lookup("butter"))
+
+    assert result is not None
+    assert result.size == "500g"
+    assert result.unit_price == "$1.48/100g"
+
+
+@pytest.mark.parametrize(
+    ("price", "comparative", "expected"),
+    [
+        # 739c at 148c/100g -> 499.3g, rounded to a recognisable 500g
+        (
+            7.39,
+            {"pricePerUnit": 148, "unitQuantity": 100, "unitQuantityUom": "g"},
+            "500g",
+        ),
+        (
+            7.99,
+            {"pricePerUnit": 67, "unitQuantity": 100, "unitQuantityUom": "g"},
+            "1.2kg",
+        ),
+        # 349c at 698c/L -> 0.5L, reported as 500ml
+        (
+            3.49,
+            {"pricePerUnit": 698, "unitQuantity": 1, "unitQuantityUom": "L"},
+            "500ml",
+        ),
+        (
+            7.29,
+            {"pricePerUnit": 61, "unitQuantity": 1, "unitQuantityUom": "ea"},
+            "12ea",
+        ),
+        # A sheet count is not a useful pack size.
+        (
+            6.59,
+            {"pricePerUnit": 31, "unitQuantity": 100, "unitQuantityUom": "sheets"},
+            None,
+        ),
+        (5.0, {}, None),
+    ],
+)
+def test_size_is_derived_from_comparative_pricing(price, comparative, expected) -> None:
+    """Foodstuffs names omit the size, but their per-unit price implies it."""
+
+    from smart_shopping_route.prices import _size_from_comparative
+
+    assert _size_from_comparative(price, comparative) == expected
+
+
+def test_comparative_unit_price_drops_a_redundant_one() -> None:
+    from smart_shopping_route.prices import _comparative_unit_price
+
+    assert (
+        _comparative_unit_price({
+            "pricePerUnit": 698,
+            "unitQuantity": 1,
+            "unitQuantityUom": "L",
+        })
+        == "$6.98/L"
+    )

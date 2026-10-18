@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.0
+
+### Fixed
+
+- **Renaming an item from the derived list failed** with "Entity does not support
+  setting field: description". The price line lives in the item description, so
+  the to-do dialog sent `description` back on save, and Home Assistant rejects the
+  whole call when a field is not advertised. The view now advertises description
+  (it is derived) and discards the stale copy instead of forwarding it.
+- Size and unit price are no longer dropped when a quote is rebuilt during
+  matching.
+
+### Added
+
+- Item descriptions now show size and unit price as well as price, for example
+  `$7.99 · 1.2kg · $0.67/100g · Sanitarium Weet-Bix Breakfast Cereal`.
+  Woolworths states the size in the product name; Foodstuffs usually omits it, so
+  the size is derived from their own comparative price (739c at 148c/100g implies
+  a 500g pack). Countable units are only shown when they mean something to a
+  shopper, so a sheet count is omitted.
+- A `was` figure is shown whenever a real reference price exists, from the
+  retailer's own was-price or from a price previously observed. The vaguer
+  "on special" label is gone.
+
 ## 0.6.1
 
 ### Fixed

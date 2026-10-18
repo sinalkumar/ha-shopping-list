@@ -135,6 +135,10 @@ class PriceQuote:
     # price: most Foodstuffs promotions are price locks whose reward value
     # equals the shelf price, so it is reported as context, not as savings.
     on_promotion: bool = False
+    # Pack size as the retailer states it ("1.2kg", "500g"), and the unit price
+    # they quote or that we compute from the size ("$6.66/kg").
+    size: str | None = None
+    unit_price: str | None = None
 
     @property
     def is_special(self) -> bool:
@@ -156,7 +160,116 @@ class PriceQuote:
             "valid_until": self.valid_until,
             "is_special": self.is_special,
             "on_promotion": self.on_promotion,
+            "size": self.size,
+            "unit_price": self.unit_price,
         }
+
+
+# Sizes as retailers write them, including Woolworths' "1.2kg" style and packs.
+_SIZE_IN_TEXT = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(kg|g|ml|l|pk|pack|sheets)\b", re.IGNORECASE
+)
+_UNIT_LABELS = {
+    "kg": ("kg", 1.0),
+    "g": ("kg", 0.001),
+    "l": ("L", 1.0),
+    "ml": ("L", 0.001),
+}
+
+
+def size_from_text(text: str) -> tuple[str, float, str] | None:
+    """Extract a pack size from a product name.
+
+    Returns ``(label, amount_in_base_unit, base_unit)`` so a unit price can be
+    computed, or None when the name states no size.
+    """
+
+    match = _SIZE_IN_TEXT.search(text or "")
+    if not match:
+        return None
+    try:
+        amount = float(match.group(1))
+    except ValueError:
+        return None
+    written = match.group(2)
+    unit = written.lower()
+    if unit in _UNIT_LABELS:
+        base_unit, factor = _UNIT_LABELS[unit]
+        return (f"{match.group(1)}{written}", amount * factor, base_unit)
+    # Countable packs are compared per pack, which is what the label already says.
+    return (f"{match.group(1)}{written}", 0.0, "")
+
+
+def compute_unit_price(price: float, size: tuple[str, float, str] | None) -> str | None:
+    """Return a per-unit price such as ``$6.66/kg``, or None when unknowable."""
+
+    if size is None or price <= 0:
+        return None
+    _label, amount, base_unit = size
+    if not base_unit or amount <= 0:
+        return None
+    return f"${price / amount:.2f}/{base_unit}"
+
+
+def _comparative_unit_price(comparative: dict[str, Any]) -> str | None:
+    """Format a retailer's own comparative price, e.g. ``$1.48/100g``."""
+
+    per_unit = comparative.get("pricePerUnit")
+    quantity = comparative.get("unitQuantity")
+    uom = comparative.get("unitQuantityUom")
+    if per_unit is None or quantity is None or not uom:
+        return None
+    try:
+        amount = float(quantity)
+        # "per 1L" reads badly; "per L" is how the shelf ticket shows it.
+        basis = f"{amount:g}{uom}" if amount != 1 else str(uom)
+        return f"${float(per_unit) / 100:.2f}/{basis}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _size_from_comparative(price: float, comparative: dict[str, Any]) -> str | None:
+    """Derive a pack size from the retailer's own per-unit figures.
+
+    Foodstuffs product names usually omit the size, but their comparative price
+    gives a price per 100g (or per unit), so the pack size follows from the shelf
+    price. This is arithmetic on the retailer's own numbers, not a guess.
+
+    Countable units are only reported when they look like a pack a shopper would
+    recognise; a toilet roll's sheet count is not a useful "size".
+    """
+
+    per_unit = comparative.get("pricePerUnit")
+    quantity = comparative.get("unitQuantity")
+    uom = comparative.get("unitQuantityUom")
+    if not per_unit or not quantity or not uom or price <= 0:
+        return None
+    try:
+        total = float(price) * float(quantity) / (float(per_unit) / 100)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if total <= 0:
+        return None
+
+    # Normalise to the smaller unit so 0.5L is reported as 500ml.
+    if uom == "L":
+        total, uom = total * 1000, "ml"
+    elif uom == "kg":
+        total, uom = total * 1000, "g"
+
+    if uom in ("g", "ml"):
+        # Round to the nearest 5, so 499.3 becomes 500 rather than looking exact.
+        rounded = round(total / 5) * 5
+        if rounded >= 1000:
+            base = "kg" if uom == "g" else "L"
+            return f"{rounded / 1000:.1f}".rstrip("0").rstrip(".") + base
+        return f"{rounded:.0f}{uom}" if rounded >= 5 else None
+
+    if uom in ("ea", "pk", "pack") and 1 <= total <= 100:
+        return f"{total:.0f}{uom}"
+
+    # Sheet counts and similar say nothing useful about the pack.
+    return None
 
 
 def _tokens(text: str) -> list[str]:
@@ -243,6 +356,8 @@ def best_match(summary: str, candidates: list[PriceQuote]) -> PriceQuote | None:
             valid_until=candidate.valid_until,
             score=score,
             on_promotion=candidate.on_promotion,
+            size=candidate.size,
+            unit_price=candidate.unit_price,
         )
     return best
 
@@ -372,14 +487,17 @@ class WoolworthsPriceClient(PriceClient):
             selling = price_block.get("sellingPrice")
             if selling is None:
                 continue
+            name = str(row["productName"])
             was = price_block.get("wasPrice")
             quotes.append(
                 PriceQuote(
                     chain=self.chain,
                     product_id=str(row["sku"]),
-                    product_name=str(row["productName"]),
+                    product_name=name,
                     price=float(selling),
                     was_price=float(was) if was else None,
+                    size=(parsed[0] if (parsed := size_from_text(name)) else None),
+                    unit_price=compute_unit_price(float(selling), size_from_text(name)),
                 )
             )
         return quotes
@@ -484,15 +602,29 @@ class PakNSavePriceClient(PriceClient):
             # The search payload carries the same promotion records as the
             # product detail endpoint, so no extra request is needed.
             on_promotion = bool(promotions)
+            single_block = product.get("singlePrice") or {}
+            comparative = single_block.get("comparativePrice") or {}
+            shelf_price = round(float(single) / 100, 2)
+            parsed_size = size_from_text(name)
+            size_label = (
+                parsed_size[0]
+                if parsed_size
+                else _size_from_comparative(shelf_price, comparative)
+            )
+            unit_price = _comparative_unit_price(comparative) or compute_unit_price(
+                shelf_price, parsed_size
+            )
             quotes.append(
                 PriceQuote(
                     chain=self.chain,
                     product_id=str(product.get("productId") or name),
                     product_name=name,
-                    price=round(float(single) / 100, 2),
+                    price=shelf_price,
                     was_price=None,
                     valid_until=str(validity) if validity else None,
                     on_promotion=on_promotion,
+                    size=size_label,
+                    unit_price=unit_price,
                 )
             )
         return quotes

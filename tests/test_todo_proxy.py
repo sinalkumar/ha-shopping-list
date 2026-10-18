@@ -158,7 +158,12 @@ def test_unknown_future_source_features_are_masked(monkeypatch) -> None:
     coordinator.source.supported_features = int(
         TodoListEntityFeature.UPDATE_TODO_ITEM
     ) | (1 << 12)
-    assert entity._proxy_features() == int(TodoListEntityFeature.UPDATE_TODO_ITEM)
+    features = entity._proxy_features()
+    # The unknown bit is dropped; description is always advertised because the
+    # price line lives there and the to-do dialog sends it back on save.
+    assert features & (1 << 12) == 0
+    assert features & int(TodoListEntityFeature.UPDATE_TODO_ITEM)
+    assert features & int(TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM)
 
 
 def test_entity_is_grouped_under_one_profile_device() -> None:
@@ -197,7 +202,7 @@ def test_entity_uses_coordinator_sections(monkeypatch) -> None:
     assert seen["sections"] == ("Produce", "Dairy", "Unclassified / Other")
 
 
-def test_price_is_rendered_into_the_item_description() -> None:
+def test_price_is_rendered_with_size_and_unit_price() -> None:
     entity, coordinator = make_entity(prefix=True)
     coordinator.prices = FakePrices({
         "Milk": PriceQuote(
@@ -206,12 +211,16 @@ def test_price_is_rendered_into_the_item_description() -> None:
             product_name="Anchor Butter 500g",
             price=8.5,
             was_price=9.7,
+            size="500g",
+            unit_price="$1.70/100g",
         )
     })
 
     descriptions = [item.description for item in entity.todo_items]
 
-    assert descriptions[0] == "$8.50 · was $9.70 · Anchor Butter 500g"
+    assert descriptions[0] == (
+        "$8.50 · was $9.70 · 500g · $1.70/100g · Anchor Butter 500g"
+    )
 
 
 def test_plain_price_has_no_was_suffix() -> None:
@@ -248,3 +257,38 @@ def test_price_lookup_uses_the_undecorated_summary() -> None:
 
     assert len(items) == 2
     assert seen == ["Milk", "Milk"]
+
+
+def test_description_is_advertised_even_when_the_source_lacks_it() -> None:
+    """Without it, Home Assistant rejects the whole save when renaming an item.
+
+    The to-do dialog sends every field back, including the derived description,
+    and validation fails the call if the entity does not advertise the feature.
+    """
+
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features = int(TodoListEntityFeature.UPDATE_TODO_ITEM)
+
+    assert entity.supported_features & int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+
+
+def test_updating_an_item_drops_the_derived_description() -> None:
+    """The description is generated from prices, so a stale copy must not be forwarded."""
+
+    entity, coordinator = make_entity(prefix=True)
+    asyncio.run(
+        entity.async_update_todo_item(
+            TodoItem(
+                uid="uid-1",
+                summary="Dairy · Milk",
+                description="$9.99 · stale price",
+                status=TodoItemStatus.NEEDS_ACTION,
+            )
+        )
+    )
+
+    forwarded = coordinator.source.updated[0]
+    assert forwarded.summary == "Milk"
+    assert forwarded.description is None

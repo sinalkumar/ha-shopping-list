@@ -63,9 +63,13 @@ class SmartShoppingRouteTodo(TodoListEntity):
             | TodoListEntityFeature.UPDATE_TODO_ITEM
             | TodoListEntityFeature.SET_DUE_DATE_ON_ITEM
             | TodoListEntityFeature.SET_DUE_DATETIME_ON_ITEM
-            | TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
         )
-        return int(self.coordinator.source.supported_features) & int(allowed)
+        features = int(self.coordinator.source.supported_features) & int(allowed)
+        # The description is derived from prices, so this view always accepts the
+        # field even when the source cannot store it. It must: the to-do dialog
+        # sends every field back on save, and Home Assistant rejects the whole
+        # call when a field is not advertised, which blocked renaming an item.
+        return features | int(TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM)
 
     @property
     def _prefix_enabled(self) -> bool:
@@ -101,23 +105,35 @@ class SmartShoppingRouteTodo(TodoListEntity):
         return decorated
 
     def _price_description(self, item: TodoItem) -> str | None:
-        """Return a short price line, or None when nothing is known."""
+        """Return a price line: price, was-price, size, unit price, product.
+
+        A "was" figure is only shown when it is a real reference: the retailer's
+        own was-price, or a price we previously observed. Nothing is invented
+        for a promotion that carries no reference, because a promotion record
+        alone does not mean the price came down.
+        """
 
         quote = self.coordinator.prices.quote_for(item.summary or "")
         if quote is None:
             return None
-        text = f"${quote.price:.2f}"
-        reference = self.coordinator.prices.snapshot.reference_price(
-            normalize_summary(item.summary or "")
-        )
+        parts = [f"${quote.price:.2f}"]
+
+        reference: float | None = None
         if quote.is_special and quote.was_price is not None:
-            text += f" · was ${quote.was_price:.2f}"
-        elif reference is not None:
-            # No retailer was-price, so use a price we actually observed.
-            text += f" · was ${reference:.2f}"
-        elif quote.on_promotion:
-            text += " · on special"
-        return f"{text} · {quote.product_name}"
+            reference = quote.was_price
+        else:
+            reference = self.coordinator.prices.snapshot.reference_price(
+                normalize_summary(item.summary or "")
+            )
+        if reference is not None and reference > quote.price:
+            parts.append(f"was ${reference:.2f}")
+
+        if quote.size:
+            parts.append(quote.size)
+        if quote.unit_price:
+            parts.append(quote.unit_price)
+        parts.append(quote.product_name)
+        return " · ".join(parts)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -162,7 +178,11 @@ class SmartShoppingRouteTodo(TodoListEntity):
         await self.coordinator.source.async_create(self._forward_summary(item))
 
     async def async_update_todo_item(self, item: TodoItem) -> None:
-        await self.coordinator.source.async_update(self._forward_summary(item))
+        forwarded = self._forward_summary(item)
+        # The description shown here is generated from live prices, so a value
+        # coming back from the UI is stale display text, not a user edit.
+        forwarded.description = None
+        await self.coordinator.source.async_update(forwarded)
 
     async def async_delete_todo_items(self, uids: list[str]) -> None:
         await self.coordinator.source.async_delete(uids)

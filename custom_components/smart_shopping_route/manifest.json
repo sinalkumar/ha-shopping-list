@@ -16,5 +16,5 @@
   "loggers": [
     "custom_components.smart_shopping_route"
   ],
-  "version": "0.6.1"
+  "version": "0.7.0"
 }
