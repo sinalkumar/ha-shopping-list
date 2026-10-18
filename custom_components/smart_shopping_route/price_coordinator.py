@@ -264,6 +264,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 force
                 or now - self._last_store_sync >= GROCER_STORE_REFRESH_HOURS * 3600
             ):
+                # Names rarely change, so they follow the store refresh.
+                await self.grocer.async_sync_names()
                 if await self.grocer.async_sync_store_prices(self.grocer_store_id):
                     self._last_store_sync = now
         except GrocerError as err:
@@ -303,6 +305,21 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         # Tracked separately from _backfilled: a transient failure must be
         # retried, while a definitive "no match" or a successful import should
         # not be attempted again.
+        pin = self._pins.get(key)
+        if pin is not None and pin.grocer_product_id:
+            # An explicit choice: use exactly that product's history.
+            try:
+                match = await self.grocer.async_pinned_match(
+                    self.grocer_store_id, pin.grocer_product_id
+                )
+            except GrocerError as err:
+                _LOGGER.debug("grocer.nz pinned history failed: %s", err)
+                match = None
+            finally:
+                self._backfill_attempts.discard(key)
+            if match is not None and match.history:
+                self._apply_history(key, match)
+            return
         self._backfill_attempts.add(key)
         try:
             match = await self.grocer.async_match_with_history(
@@ -319,6 +336,12 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             return
         if not match.history:
             return
+        self._apply_history(key, match)
+        self._backfilled.add(key)
+
+    def _apply_history(self, key: str, match: Any) -> None:
+        """Merge imported history with our own fresher observations."""
+
         imported = [
             PricePoint(ts, price)
             for ts, price in match.history[-PRICE_HISTORY_MAX_POINTS:]
@@ -438,6 +461,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         query: str = "",
         product_id: str | None = None,
         product_name: str | None = None,
+        grocer_product_id: int | None = None,
     ) -> None:
         """Pin the product an item means, then re-price just that item."""
 
@@ -450,6 +474,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             query=query.strip(),
             product_id=product_id,
             product_name=product_name,
+            grocer_product_id=grocer_product_id,
         )
         # Forget what we concluded before; the pin replaces it.
         self._snapshot.quotes.pop(key, None)

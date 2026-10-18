@@ -280,19 +280,22 @@ def build_match_data(data_dir, *, regular: float, sale: float | None) -> None:
     }
 
 
-async def _fake_search(_self, _query):
-    return [
-        GrocerProduct(6403, "Weet-Bix", "Sanitarium", "1.2kg", {228}),
-        GrocerProduct(111, "Weet-Bix", "Sanitarium", "375g", {228}),
-        GrocerProduct(42243, "Anchor Butter", "", "500g", {228}),
-    ]
+NAMES = {
+    6403: "sanitarium weet bix breakfast cereal",
+    111: "sanitarium weet bix",
+    42243: "pure butter",
+}
+
+
+def _fake_names(_self):
+    return dict(NAMES)
 
 
 def test_match_requires_price_agreement(data_dir, monkeypatch) -> None:
     """A name match alone is not trusted; the price must agree."""
 
     build_match_data(data_dir, regular=7.99, sale=None)
-    monkeypatch.setattr(GrocerData, "_async_search", _fake_search)
+    monkeypatch.setattr(GrocerData, "names", _fake_names)
 
     hit = asyncio.run(data_dir.async_match(228, "Sanitarium Weet-Bix 1.2kg", 7.99))
     miss = asyncio.run(data_dir.async_match(228, "Sanitarium Weet-Bix 1.2kg", 12.5))
@@ -306,7 +309,7 @@ def test_match_accepts_the_sale_price(data_dir, monkeypatch) -> None:
     """Retailers quote the special price, so the sale price must validate too."""
 
     data_dir._store_prices = {228: {42243: GrocerPrice(42243, 9.69, 8.5)}}
-    monkeypatch.setattr(GrocerData, "_async_search", _fake_search)
+    monkeypatch.setattr(GrocerData, "names", _fake_names)
 
     hit = asyncio.run(data_dir.async_match(228, "Anchor Butter 500g", 8.5))
 
@@ -315,17 +318,13 @@ def test_match_accepts_the_sale_price(data_dir, monkeypatch) -> None:
     assert hit.price.effective == 8.5
 
 
-def test_match_rejects_a_price_agreeing_wrong_size(data_dir, monkeypatch) -> None:
-    """Two sizes often share a price, so size must be checked as well."""
+def test_match_rejects_a_wrong_product_that_shares_words(data_dir, monkeypatch) -> None:
+    """Name similarity alone is not enough; the price must agree too."""
 
-    data_dir._store_prices = {228: {1: GrocerPrice(1, 1.89, None)}}
-
-    async def search(_self, _query):
-        return [
-            GrocerProduct(1, "Sealord Tuna Olive Oil Blend", "Sealord", "95g", {228})
-        ]
-
-    monkeypatch.setattr(GrocerData, "_async_search", search)
+    data_dir._store_prices = {228: {1: GrocerPrice(1, 13.99, None)}}
+    monkeypatch.setattr(
+        GrocerData, "names", lambda _self: {1: "pams extra virgin olive oil"}
+    )
 
     assert (
         asyncio.run(
@@ -335,14 +334,13 @@ def test_match_rejects_a_price_agreeing_wrong_size(data_dir, monkeypatch) -> Non
     )
 
 
-def test_match_skips_products_the_store_does_not_stock(data_dir, monkeypatch) -> None:
-    data_dir._store_prices = {228: {6403: GrocerPrice(6403, 7.99, None)}}
+def test_match_only_considers_products_the_store_stocks(data_dir, monkeypatch) -> None:
+    """Candidates come from the store's own price file, not the whole catalogue."""
 
-    async def search(_self, _query):
-        # Search says this product is only sold at another store.
-        return [GrocerProduct(6403, "Weet-Bix", "Sanitarium", "1.2kg", {85})]
-
-    monkeypatch.setattr(GrocerData, "_async_search", search)
+    data_dir._store_prices = {85: {6403: GrocerPrice(6403, 7.99, None)}}
+    monkeypatch.setattr(
+        GrocerData, "names", lambda _self: {6403: "sanitarium weet bix"}
+    )
 
     assert (
         asyncio.run(data_dir.async_match(228, "Sanitarium Weet-Bix 1.2kg", 7.99))
@@ -352,7 +350,7 @@ def test_match_skips_products_the_store_does_not_stock(data_dir, monkeypatch) ->
 
 def test_match_without_a_price_is_refused(data_dir, monkeypatch) -> None:
     build_match_data(data_dir, regular=7.99, sale=None)
-    monkeypatch.setattr(GrocerData, "_async_search", _fake_search)
+    monkeypatch.setattr(GrocerData, "names", _fake_names)
 
     assert (
         asyncio.run(data_dir.async_match(228, "Sanitarium Weet-Bix 1.2kg", None))
@@ -361,7 +359,7 @@ def test_match_without_a_price_is_refused(data_dir, monkeypatch) -> None:
 
 
 def test_match_with_no_store_prices_is_none(data_dir, monkeypatch) -> None:
-    monkeypatch.setattr(GrocerData, "_async_search", _fake_search)
+    monkeypatch.setattr(GrocerData, "names", _fake_names)
 
     assert (
         asyncio.run(data_dir.async_match(228, "Sanitarium Weet-Bix 1.2kg", 7.99))
@@ -514,7 +512,11 @@ def test_grocer_sync_timestamps_are_persisted() -> None:
     async def zero():
         return 0
 
+    async def names_ok():
+        return True
+
     coordinator._grocer_data = SimpleNamespace(
+        async_sync_names=names_ok,
         async_sync_store_prices=ok,
         async_mirrored_bytes=zero,
         prune_history=lambda keep, maximum: 0,
@@ -569,3 +571,189 @@ def test_manifest_keys_are_sorted_for_hassfest() -> None:
 
     assert keys[:2] == ["domain", "name"]
     assert keys[2:] == sorted(keys[2:])
+
+
+# --- product names from the sitemap ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://grocer.nz/product/6403/sanitarium-weet-bix-breakfast-cereal",
+            (6403, "sanitarium weet bix breakfast cereal"),
+        ),
+        (
+            "https://grocer.nz/product/1/loose-leaf-tea-english-breakfast-125g",
+            (1, "loose leaf tea english breakfast 125g"),
+        ),
+        ("https://grocer.nz/", None),
+        ("https://grocer.nz/product/abc/thing", None),
+        ("https://grocer.nz/product/12/", None),
+    ],
+)
+def test_product_url_parsing(url, expected) -> None:
+    from smart_shopping_route.grocer import _parse_product_url
+
+    assert _parse_product_url(url) == expected
+
+
+class TextSession:
+    """Serves sitemap text for the name index."""
+
+    def __init__(self, pages: list[str]) -> None:
+        self.pages = list(pages)
+        self.urls: list[str] = []
+
+    def get(self, url, **_kwargs):
+        self.urls.append(url)
+        body = self.pages.pop(0) if self.pages else ""
+        return _TextResponse(body)
+
+
+class _TextResponse:
+    def __init__(self, body: str) -> None:
+        self.status = 200
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def text(self):
+        return self._body
+
+
+def test_names_are_built_from_the_sitemaps(data_dir) -> None:
+    pages = [
+        "https://grocer.nz/product/6403/sanitarium-weet-bix\nhttps://grocer.nz/\n",
+        "https://grocer.nz/product/42243/pure-butter\n",
+        "https://grocer.nz/product/101540/sealord-tuna-olive-oil-blend\n",
+    ]
+    data_dir._session = TextSession(pages)
+
+    assert asyncio.run(data_dir.async_sync_names()) is True
+
+    names = data_dir.names()
+    assert names[6403] == "sanitarium weet bix"
+    assert names[42243] == "pure butter"
+    assert names[101540] == "sealord tuna olive oil blend"
+    assert len(names) == 3
+
+
+def test_names_are_empty_when_not_mirrored(data_dir) -> None:
+    assert data_dir.names() == {}
+
+
+def test_names_sync_fails_without_any_products(data_dir) -> None:
+    data_dir._session = TextSession(["https://grocer.nz/\n", "", ""])
+
+    assert asyncio.run(data_dir.async_sync_names()) is False
+    assert data_dir.names() == {}
+
+
+def test_names_tolerate_a_bad_id_line(data_dir) -> None:
+    target = data_dir._dir / "names.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("6403\tsanitarium weet bix\nnope\tbroken\n\n", encoding="utf-8")
+
+    assert data_dir.names() == {6403: "sanitarium weet bix"}
+
+
+def test_match_uses_sitemap_names(data_dir, monkeypatch) -> None:
+    """End to end: names from the sitemap, prices from the store file."""
+
+    data_dir._store_prices = {228: {6403: GrocerPrice(6403, 7.99, None)}}
+    target = data_dir._dir / "names.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("6403\tsanitarium weet bix breakfast cereal\n", encoding="utf-8")
+
+    hit = asyncio.run(data_dir.async_match(228, "Sanitarium Weet-Bix 1.2kg", 7.99))
+
+    assert hit is not None
+    assert hit.product.product_id == 6403
+    assert hit.product.name == "sanitarium weet bix breakfast cereal"
+
+
+def test_match_is_skipped_when_names_are_unavailable(data_dir, monkeypatch) -> None:
+    data_dir._store_prices = {228: {6403: GrocerPrice(6403, 7.99, None)}}
+    monkeypatch.setattr(GrocerData, "names", lambda _self: {})
+
+    assert (
+        asyncio.run(data_dir.async_match(228, "Sanitarium Weet-Bix 1.2kg", 7.99))
+        is None
+    )
+
+
+def test_pinned_grocer_product_uses_that_history(data_dir) -> None:
+    """The escape hatch for variants slugs cannot distinguish."""
+
+    data_dir._store_prices = {228: {6403: GrocerPrice(6403, 7.99, None)}}
+    names = data_dir._dir / "names.txt"
+    names.parent.mkdir(parents=True, exist_ok=True)
+    names.write_text("6403\tsanitarium weet bix\n", encoding="utf-8")
+
+    async def history_synced(_product_id):
+        return True
+
+    data_dir.async_sync_history = history_synced  # type: ignore[method-assign]
+    data_dir._history_override = [(1000.0, 5.0), (2000.0, 7.99)]
+
+    def fake_history(product_id, store_id):
+        return list(data_dir._history_override) if product_id == 6403 else []
+
+    data_dir.history = fake_history  # type: ignore[method-assign]
+
+    match = asyncio.run(data_dir.async_pinned_match(228, 6403))
+
+    assert match is not None
+    assert match.product.product_id == 6403
+    assert [price for _ts, price in match.history] == [5.0, 7.99]
+
+
+def test_pinned_grocer_product_must_be_stocked(data_dir) -> None:
+    data_dir._store_prices = {228: {}}
+
+    assert asyncio.run(data_dir.async_pinned_match(228, 999)) is None
+
+
+def test_backfill_honours_a_grocer_pin() -> None:
+    """A pinned grocer product bypasses automatic matching entirely."""
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), _entry({"grocer_store_id": 228}), summaries=lambda: ["Flora"]
+    )
+    called: list[int] = []
+
+    async def pinned(_store_id, product_id):
+        called.append(product_id)
+        return GrocerMatch(
+            product=GrocerProduct(product_id, "flora pro activ buttery spread"),
+            price=GrocerPrice(product_id, 8.79, None),
+            history=[(1000.0, 7.39), (2000.0, 9.79)],
+        )
+
+    async def auto(*_args, **_kwargs):
+        raise AssertionError("automatic matching must not run for a pinned item")
+
+    coordinator._grocer_data = SimpleNamespace(
+        async_pinned_match=pinned,
+        async_match_with_history=auto,
+        mirrored_bytes=lambda: 0,
+    )
+    coordinator._pins["flora"] = price_coordinator.ProductPin(
+        chain="paknsave", grocer_product_id=10749
+    )
+    quote = price_coordinator.PriceQuote(
+        chain="paknsave",
+        product_id="p",
+        product_name="Flora ProActiv Buttery",
+        price=8.79,
+    )
+
+    asyncio.run(coordinator._async_backfill("flora", quote))
+
+    assert called == [10749]
+    assert [p.price for p in coordinator.snapshot.points_for("flora")] == [7.39, 9.79]

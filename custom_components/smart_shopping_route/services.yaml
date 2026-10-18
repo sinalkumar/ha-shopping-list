@@ -52,6 +52,11 @@ pin_item_product:
     product_id:
       selector:
         text:
+    grocer_product_id:
+      selector:
+        number:
+          min: 1
+          mode: box
 unpin_item_product:
   target:
     entity:

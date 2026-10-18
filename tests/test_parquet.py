@@ -20,7 +20,6 @@ from smart_shopping_route.parquet import (
     read_columns,
 )
 
-
 # --- thrift compact protocol ------------------------------------------------
 
 
@@ -266,3 +265,41 @@ def test_real_parquet_magic_is_checked(tmp_path) -> None:
     pq.write_table(pa.table({"a": [1]}), path)
 
     assert path.read_bytes()[:4] == PARQUET_MAGIC
+
+
+# --- a real file, embedded --------------------------------------------------
+# CI does not install pyarrow, so the read path would otherwise be untested
+# there. This is a real Parquet file written once by pyarrow: two INT32 columns,
+# gzip, dictionary-encoded, with nulls. Embedding it keeps the test independent
+# of pyarrow while still exercising the true read path.
+
+REAL_PARQUET_B64 = """
+UEFSMRUEFSAVPkwVCBUAEgAAH4sIAAAAAAACA2NkYGBgAmJmIGYBYgDv1AWvEAAAABUAFRQVPCwVCBUQFQYVBhwYBAQAAAAYBAEAAAAWACgEBAAAABgEAQAAABERAAAAH4sIAAAAAAACA2NiYGDgYGRifsIAAKxTEaQKAAAAFQQVEBU4TBUEFQASAAAfiwgAAAAAAAIDO87AwBDLyMAAAA8s5C0IAAAAFQAVEhU6LBUIFRAVBhUGHBgEXQEAABgExwAAABYEKARdAQAAGATHAAAAEREAAAAfiwgAAAAAAAIDY2JgYGBmZWRmAgAS7mB8CQAAABUEGTw1ABgGc2NoZW1hFQQAFQIlAhgCaWQAFQIlAhgFcHJpY2UAFggZHBksJgAcFQIZNQAGEBkYAmlkFQQWCBauARb0ASZiJggcGAQEAAAAGAQBAAAAFgAoBAQAAAAYBAEAAAAREQAZLBUEFQAVAgAVABUQFQIAPCkGGSYACAAAACYAHBUCGTUABhAZGAVwcmljZRUEFggWnAEW7AEm0AIm/AEcGARdAQAAGATHAAAAFgQoBF0BAAAYBMcAAAAREQAZLBUEFQAVAgAVABUQFQIAPCkGGSYEBAAAABbKAhYIJggW4AMAGRwYDEFSUk9XOnNjaGVtYRj4AS8vLy8vN0FBQUFBUUFBQUFBQUFLQUF3QUJnQUZBQWdBQ2dBQUFBQUJCQUFNQUFBQUNBQUlBQUFBQkFBSUFBQUFCQUFBQUFJQUFBQklBQUFBQkFBQUFORC8vLzhBQUFFQ0VBQUFBQmdBQUFBRUFBQUFBQUFBQUFVQUFBQndjbWxqWlFBQUFNVC8vLzhBQUFBQklBQUFBQkFBRkFBSUFBWUFCd0FNQUFBQUVBQVFBQUFBQUFBQkFoQUFBQUFjQUFBQUJBQUFBQUFBQUFBQ0FBQUFhV1FBQUFnQURBQUlBQWNBQ0FBQUFBQUFBQUVnQUFBQUFBQUFBQT09ABggcGFycXVldC1jcHAtYXJyb3cgdmVyc2lvbiAyNi4wLjAZLBwAABwAAAAdAgAAUEFSMQ==
+"""
+
+
+@pytest.fixture
+def real_parquet(tmp_path):
+    import base64
+
+    path = tmp_path / "real.parquet"
+    path.write_bytes(base64.b64decode(REAL_PARQUET_B64))
+    return path
+
+
+def test_reads_a_real_file_without_pyarrow(real_parquet) -> None:
+    """Covers decoding, gzip, dictionary indices, and nulls in CI."""
+
+    result = read_columns(str(real_parquet), ["id", "price"])
+
+    assert result["id"] == [1, 2, 3, 4]
+    assert result["price"] == [199, None, 349, None]
+
+
+def test_real_file_reports_missing_columns(real_parquet) -> None:
+    with pytest.raises(ParquetError):
+        read_columns(str(real_parquet), ["other"])
+
+
+def test_real_file_can_read_one_column(real_parquet) -> None:
+    assert list(read_columns(str(real_parquet), ["id"])) == ["id"]

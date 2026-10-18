@@ -150,6 +150,10 @@
         "product_id": {
           "name": "Product ID",
           "description": "Optional exact retailer product ID. When set, only that product is accepted."
+        },
+        "grocer_product_id": {
+          "name": "grocer.nz product ID",
+          "description": "Optional. Pin the exact grocer.nz product for price history, when automatic matching picks a sibling variant. The number is in the product's URL on grocer.nz."
         }
       }
     },

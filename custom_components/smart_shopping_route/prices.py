@@ -84,6 +84,9 @@ class ProductPin:
     query: str = ""
     product_id: str | None = None
     product_name: str | None = None
+    # grocer.nz product id, used only for price history. Set it when automatic
+    # matching picks a sibling variant, which slugs cannot distinguish.
+    grocer_product_id: int | None = None
 
     @property
     def match_target(self) -> str:
@@ -97,6 +100,7 @@ class ProductPin:
             "query": self.query,
             "product_id": self.product_id,
             "product_name": self.product_name,
+            "grocer_product_id": self.grocer_product_id,
         }
 
     @classmethod
@@ -107,6 +111,11 @@ class ProductPin:
             product_id=(str(data["product_id"]) if data.get("product_id") else None),
             product_name=(
                 str(data["product_name"]) if data.get("product_name") else None
+            ),
+            grocer_product_id=(
+                int(data["grocer_product_id"])
+                if data.get("grocer_product_id")
+                else None
             ),
         )
 

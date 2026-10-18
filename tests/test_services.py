@@ -446,7 +446,9 @@ def test_pin_service_pins_the_item(hass) -> None:
     class Prices:
         enabled = True
 
-        async def async_pin(self, summary, *, query="", product_id=None):
+        async def async_pin(
+            self, summary, *, query="", product_id=None, grocer_product_id=None
+        ):
             pinned.append({
                 "summary": summary,
                 "query": query,
@@ -575,7 +577,9 @@ def test_pin_service_leaves_notification_to_the_price_coordinator(hass) -> None:
     class Prices:
         enabled = True
 
-        async def async_pin(self, summary, *, query="", product_id=None):
+        async def async_pin(
+            self, summary, *, query="", product_id=None, grocer_product_id=None
+        ):
             return None
 
         async def async_unpin(self, summary):

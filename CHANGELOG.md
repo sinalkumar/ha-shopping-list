@@ -22,6 +22,11 @@
 - **Price history store** is now the numeric **grocer.nz store ID**, because the
   store list is rendered in the browser only and resolving names would have
   needed a dependency.
+- Product names come from grocer.nz's sitemap (114k public URLs) rather than a
+  search key, so nothing credential-like ships in the repository.
+- `pin_item_product` gains `grocer_product_id`, which pins the exact product used
+  for history. Slugs carry no pack size or variant, so automatic matching can
+  pick a sibling variant at the same price; pinning is the correction.
 
 ## 0.6.0
 

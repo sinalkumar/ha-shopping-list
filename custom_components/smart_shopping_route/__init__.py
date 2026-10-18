@@ -18,6 +18,7 @@ from homeassistant.helpers.target import (
 )
 
 from .const import (
+    ATTR_GROCER_PRODUCT_ID,
     ATTR_INCLUDE_MANUAL,
     ATTR_ITEM_UID,
     ATTR_PRODUCT_ID,
@@ -174,6 +175,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 item.summary or "",
                 query=call.data.get(ATTR_QUERY, ""),
                 product_id=call.data.get(ATTR_PRODUCT_ID),
+                grocer_product_id=call.data.get(ATTR_GROCER_PRODUCT_ID),
             )
         except ValueError as err:
             raise ServiceValidationError(str(err)) from err
@@ -229,6 +231,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             vol.Required(ATTR_ITEM_UID): cv.string,
             vol.Optional(ATTR_QUERY, default=""): cv.string,
             vol.Optional(ATTR_PRODUCT_ID): cv.string,
+            vol.Optional(ATTR_GROCER_PRODUCT_ID): vol.Coerce(int),
         }),
     )
     hass.services.async_register(

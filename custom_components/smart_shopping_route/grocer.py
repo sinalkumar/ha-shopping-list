@@ -42,12 +42,12 @@ ASSET_BASE = "https://assets-prod.grocer.nz/public"
 STORE_PRICES_URL = f"{ASSET_BASE}/prices_per_store_v3/public_prices_{{store}}.parquet"
 PRODUCT_HISTORY_URL = f"{ASSET_BASE}/price_history_v3/price_history_{{product}}.parquet"
 
-# Product names come from grocer.nz's own search service rather than the DuckDB
-# catalogue: it is a plain HTTP call with no compiled dependency, and it ranks
-# results, which matters because a flat catalogue scan is much worse at guessing
-# what "Strawberries" means. This is the public search key the web app ships.
-SEARCH_URL = "https://meilisearch.grocer.nz/indexes/products/search"
-SEARCH_KEY = "7f58239330307ec585c86863f985ab83cbb9ce951a9601c66e158548fb632fd1"
+# Product names come from grocer.nz's sitemap: 114k URLs of the form
+# /product/<id>/<slug>, which is public, needs no credentials, and covers every
+# product in the catalogue. Slugs are the only name source that needs neither a
+# compiled reader nor an API key.
+SITEMAP_URLS = tuple(f"{ASSET_BASE}/sitemap_{index}.txt" for index in range(3))
+NAMES_FILE = "names.txt"
 # A price match must be within this many cents to count as the same product.
 PRICE_TOLERANCE = 0.02
 # Minimum name similarity before a candidate is even considered.
@@ -90,6 +90,21 @@ def _sizes_compatible(wanted: str, candidate: str) -> bool:
 
 
 MAX_HISTORY_POINTS = 400
+
+
+_PRODUCT_URL_RE = re.compile(r"/product/(\d+)/([^/?#]+)")
+
+
+def _parse_product_url(url: str) -> tuple[int, str] | None:
+    """Turn ``/product/6403/sanitarium-weet-bix`` into ``(6403, "sanitarium weet-bix")``."""
+
+    match = _PRODUCT_URL_RE.search(url)
+    if not match:
+        return None
+    slug = match.group(2).replace("-", " ").strip()
+    if not slug:
+        return None
+    return int(match.group(1)), slug
 
 
 class GrocerError(Exception):
@@ -165,6 +180,7 @@ class GrocerData:
         self._catalogue: dict[int, GrocerProduct] | None = None
         self._stores: dict[int, str] | None = None
         self._store_prices: dict[int, dict[int, GrocerPrice]] = {}
+        self._names: dict[int, str] | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         # Parquet reads run in executor threads and are pure Python, so they are
         # safe to run concurrently; no shared database handle exists any more.
@@ -187,48 +203,67 @@ class GrocerData:
 
         return True
 
-    async def _async_search(self, query: str) -> list[GrocerProduct]:
-        """Ask grocer.nz's search service for products matching a phrase.
+    async def async_sync_names(self) -> bool:
+        """Mirror the product name index built from grocer.nz's sitemaps."""
 
-        This replaces reading the DuckDB catalogue, which needed a compiled
-        dependency with no Home Assistant OS wheels. Search also ranks results by
-        popularity, which a flat catalogue scan cannot do.
-        """
+        async with self._lock("names"):
+            target = self._dir / NAMES_FILE
+            target.parent.mkdir(parents=True, exist_ok=True)
+            lines: list[str] = []
+            for url in SITEMAP_URLS:
+                text = await self._async_download_text(url)
+                if text is None:
+                    return False
+                for line in text.splitlines():
+                    parsed = _parse_product_url(line)
+                    if parsed is not None:
+                        lines.append(f"{parsed[0]}\t{parsed[1]}")
+            if not lines:
+                return False
+            temp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
+            try:
+                temp.write_text("\n".join(lines), encoding="utf-8")
+                temp.replace(target)
+            except OSError as err:
+                temp.unlink(missing_ok=True)
+                raise GrocerError("grocer.nz names could not be written") from err
+            self._names = None
+            self._mirror_bytes = None
+            return True
 
-        if not query.strip():
-            return []
-        payload = {"q": query, "limit": 20}
+    async def _async_download_text(self, url: str) -> str | None:
         try:
-            async with self.session.post(
-                SEARCH_URL,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {SEARCH_KEY}",
-                    "content-type": "application/json",
-                },
-                timeout=aiohttp.ClientTimeout(total=20),
+            async with self.session.get(
+                url, timeout=aiohttp.ClientTimeout(total=60)
             ) as response:
                 if response.status != 200:
-                    raise GrocerError(f"grocer.nz search returned {response.status}")
-                body = await response.json(content_type=None)
-        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
-            raise GrocerError("grocer.nz search failed") from err
+                    raise GrocerError(f"grocer.nz returned {response.status}")
+                return await response.text()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise GrocerError("grocer.nz download failed") from err
 
-        products: list[GrocerProduct] = []
-        for hit in body.get("hits") or []:
-            if not isinstance(hit, dict) or hit.get("id") is None:
-                continue
-            stores = hit.get("stores")
-            products.append(
-                GrocerProduct(
-                    int(hit["id"]),
-                    str(hit.get("name") or ""),
-                    str(hit.get("brand") or ""),
-                    "" if hit.get("size") is None else str(hit["size"]),
-                    {int(s) for s in stores} if isinstance(stores, list) else None,
-                )
-            )
-        return products
+    def names(self) -> dict[int, str]:
+        """Return ``{product_id: name}`` from the mirrored sitemap index."""
+
+        if self._names is not None:
+            return self._names
+        path = self._dir / NAMES_FILE
+        if not path.exists():
+            return {}
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as err:
+            raise GrocerError("grocer.nz names could not be read") from err
+        names: dict[int, str] = {}
+        for line in text.splitlines():
+            product_id, _sep, name = line.partition("\t")
+            if name:
+                try:
+                    names[int(product_id)] = name
+                except ValueError:
+                    continue
+        self._names = names
+        return names
 
     # -- per-store prices -------------------------------------------------
 
@@ -387,6 +422,10 @@ class GrocerData:
         the price the retailer just quoted, either its regular or its sale price.
         That makes an otherwise ambiguous name match self-validating, and it is
         why this can safely import history rather than merely guess.
+
+        Pack size is not available from the sitemap slugs, so two sizes of the
+        same product that share a price cannot be told apart here; price
+        agreement is the protection.
         """
 
         if price is None:
@@ -394,40 +433,74 @@ class GrocerData:
         prices = await self.hass.async_add_executor_job(self.store_prices, store_id)
         if not prices:
             return None
+        names = await self.hass.async_add_executor_job(self.names)
+        if not names:
+            return None
         target = _normalise(name)
         if not target:
             return None
 
-        products = await self._async_search(name)
-        scored: list[tuple[float, GrocerProduct]] = []
-        for product in products:
-            if product.product_id not in prices:
+        # Cheap prefilter: a candidate with no word in common cannot score well,
+        # and skipping it keeps this linear-ish instead of comparing every
+        # product at the store on every item.
+        target_tokens = set(_normalise(name).split())
+        scored: list[tuple[float, int, str]] = []
+        for product_id in prices:
+            label = names.get(product_id)
+            if not label:
                 continue
-            if product.stores is not None and store_id not in product.stores:
+            if not target_tokens & set(label.split()):
                 continue
-            if not _sizes_compatible(name, product.label):
-                continue
-            ratio = SequenceMatcher(None, target, _normalise(product.label)).ratio()
+            ratio = SequenceMatcher(None, target, label).ratio()
             if ratio >= MIN_NAME_RATIO:
-                scored.append((ratio, product))
-        # Search already ranks by popularity, so ties keep that order.
+                scored.append((ratio, product_id, label))
         scored.sort(key=lambda item: item[0], reverse=True)
 
-        for ratio, product in scored[:25]:
-            row = prices[product.product_id]
+        for ratio, product_id, label in scored[:25]:
+            row = prices[product_id]
             if abs(row.regular - price) <= tolerance or (
                 row.sale is not None and abs(row.sale - price) <= tolerance
             ):
                 history = await self.hass.async_add_executor_job(
-                    self.history, product.product_id, store_id
+                    self.history, product_id, store_id
                 )
                 return GrocerMatch(
-                    product=product,
+                    product=GrocerProduct(product_id, label),
                     price=row,
                     history=history,
                     name_ratio=ratio,
                 )
         return None
+
+    async def async_pinned_match(
+        self, store_id: int, product_id: int
+    ) -> GrocerMatch | None:
+        """Return the history for one explicitly chosen product.
+
+        This is the escape hatch for variants that slugs cannot distinguish: a
+        user who pins the product gets exactly that product's history, with no
+        guessing. Nothing is returned when the store does not stock it.
+        """
+
+        prices = await self.hass.async_add_executor_job(self.store_prices, store_id)
+        row = prices.get(product_id)
+        if row is None:
+            return None
+        names = await self.hass.async_add_executor_job(self.names)
+        label = names.get(product_id, str(product_id))
+        if not await self.async_sync_history(product_id):
+            return None
+        history = await self.hass.async_add_executor_job(
+            self.history, product_id, store_id
+        )
+        if not history:
+            return None
+        return GrocerMatch(
+            product=GrocerProduct(product_id, label),
+            price=row,
+            history=history,
+            name_ratio=1.0,
+        )
 
     async def async_match_with_history(
         self, store_id: int, name: str, price: float | None

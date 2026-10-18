@@ -128,6 +128,7 @@ data:
 
 - `query` is searched instead of the item name. This alone is usually enough: `Kids vitamins` plus `Kids Multivitamin Gummies` resolves to *Example Brand Kids Multivitamin Gummies 110 Pack*.
 - `product_id` is optional and pins one exact product. With it set, only that product is accepted, so the 30-pack and 110-pack of the same gummies can never be confused. If the retailer stops stocking it, no price is shown rather than a near-miss being substituted.
+- `grocer_product_id` pins the exact grocer.nz product used for price history. Use it when automatic history matching picks a sibling variant: grocer.nz slugs do not carry pack sizes or flavour names, so "Flora ProActiv Buttery" can match "Flora ProActiv Light". The number is in the product's URL on grocer.nz.
 - `unpin_item_product` forgets the decision and returns to automatic matching.
 
 Pins are per profile and per chain, because each retailer has its own catalogue. A pin survives the item being ticked off and added again.
