@@ -1466,3 +1466,117 @@ def test_woolworths_quotes_are_not_flagged_as_promotions() -> None:
 
     assert result is not None
     assert result.on_promotion is False
+
+
+def test_malformed_point_values_do_not_crash_restore() -> None:
+    """Persisted history is read during setup; one bad value must not stop it."""
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._price_store.initial = {
+        "history": {
+            "butter": {
+                "points": [
+                    [1.0, 5.0],
+                    [1.0, "bad"],
+                    [None, 4.0],
+                    ["x", "y"],
+                    [2.0, 6.0],
+                    [3.0, 0],
+                    [4.0, -1],
+                    [float("inf"), 5.0],
+                    [5.0, 7.0],
+                ]
+            }
+        }
+    }
+
+    asyncio.run(coordinator.async_load())
+
+    assert [p.price for p in coordinator.snapshot.points_for("butter")] == [
+        5.0,
+        6.0,
+        7.0,
+    ]
+
+
+def test_restore_enforces_the_global_history_bound() -> None:
+    """A store written before a lower bound must be trimmed on load."""
+
+    from smart_shopping_route.const import PRICE_HISTORY_MAX
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._price_store.initial = {
+        "history": {
+            f"item {i}": {"points": [[1.0, 5.0]]} for i in range(PRICE_HISTORY_MAX + 75)
+        }
+    }
+
+    asyncio.run(coordinator.async_load())
+
+    assert len(coordinator.snapshot.history) <= PRICE_HISTORY_MAX
+
+
+def test_a_drop_survives_an_incremental_refresh_that_skips_the_item(
+    monkeypatch,
+) -> None:
+    """Adding an unrelated item must not erase a drop found earlier."""
+
+    prices = {"Butter": 9.0}
+    summaries = ["Butter"]
+
+    class Client:
+        async def async_lookup(self, summary, _pin=None):
+            if summary == "Butter":
+                return quote("Pams Butter 500g", prices["Butter"])
+            return quote("Milk 2L", 4.0)
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: list(summaries)
+    )
+    coordinator._client = Client()
+    asyncio.run(coordinator._async_update_data())
+
+    prices["Butter"] = 7.5
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.snapshot.drop_for("butter") == 1.5
+
+    # A new item arrives; Butter is already priced so it is not re-fetched.
+    summaries.append("Milk")
+    coordinator._force_full = False
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.snapshot.drop_for("butter") == 1.5
+
+
+def test_a_failed_refresh_does_not_erase_a_known_drop(monkeypatch) -> None:
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    class Flaky:
+        def __init__(self) -> None:
+            self.fail = False
+
+        async def async_lookup(self, _summary, _pin=None):
+            if self.fail:
+                raise PriceError("down")
+            return quote("Pams Butter 500g", 7.5)
+
+    client = Flaky()
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._client = client
+    coordinator._snapshot.history["butter"] = [price_coordinator.PricePoint(0.0, 9.0)]
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.snapshot.drop_for("butter") == 1.5
+
+    client.fail = True
+    coordinator._force_full = True
+    with pytest.raises(UpdateFailed):
+        asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.snapshot.drop_for("butter") == 1.5

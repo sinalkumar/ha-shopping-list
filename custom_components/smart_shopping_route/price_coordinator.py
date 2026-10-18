@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -154,6 +155,26 @@ class PriceSnapshot:
         return sum(count for key, count in self.active.items() if key in self.failed)
 
 
+def _parse_point(raw: Any) -> PricePoint | None:
+    """Build a point from persisted data, or None if it is unusable.
+
+    Persisted history is user data that an older version or a partial write can
+    leave malformed, and it is read during setup, so a bad point must never
+    raise: one corrupt entry would otherwise stop the profile loading.
+    """
+
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    try:
+        ts = float(raw[0])
+        price = float(raw[1])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not (math.isfinite(ts) and math.isfinite(price)) or price <= 0:
+        return None
+    return PricePoint(ts, price)
+
+
 class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
     """Look up one price per shopping item, slowly and politely."""
 
@@ -263,18 +284,21 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 points = entry.get("points") if isinstance(entry, dict) else None
                 if not isinstance(points, list):
                     continue
-                series = [
-                    PricePoint(float(ts), float(price))
-                    for ts, price in (
-                        point
-                        for point in points
-                        if isinstance(point, (list, tuple)) and len(point) == 2
-                    )
-                ]
+                series: list[PricePoint] = []
+                for point in points:
+                    parsed = _parse_point(point)
+                    if parsed is not None:
+                        series.append(parsed)
                 if series:
-                    self._snapshot.history[key] = series[-PRICE_HISTORY_MAX_POINTS:]
+                    self._snapshot.history[str(key)] = series[
+                        -PRICE_HISTORY_MAX_POINTS:
+                    ]
+        # A restored store can predate a lower bound, and a failed or disabled
+        # refresh would never reach the trim in _prune, so bound it here too.
+        self._trim_history(set(self._snapshot.history))
 
     async def _async_persist(self) -> None:
+        self._trim_history(set(self._snapshot.history))
         await self._price_store.async_save({
             "pins": {key: pin.as_dict() for key, pin in self._pins.items()},
             "history": {
@@ -433,7 +457,6 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             active[key] += 1
             first_summary.setdefault(key, summary)
         self._snapshot.active = dict(active)
-        self._snapshot.drops_now.clear()
 
         force = self._force_full
         self._force_full = False
@@ -556,6 +579,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
 
         # Derive the drop from the observation before this one. The new price is
         # appended afterwards, so the comparison cannot be against itself.
+        # Only the keys observed in this cycle are touched, so a drop found
+        # earlier survives an incremental refresh that did not re-price it.
         if last is not None and last.price > quote.price and not quote.is_special:
             self._snapshot.drops_now[key] = round(last.price - quote.price, 2)
         else:
