@@ -155,7 +155,9 @@ Prices refresh every 12 hours on their own schedule, and each item is priced onc
 
 ### Matching
 
-Item names are matched to retailer product titles by comparing words, so `Weetbix` finds `Weet-Bix`, and `Toilet paper` finds `Toilet Tissues`. When an item has a bracketed qualifier the plain term is searched first and the qualifier is added only if nothing good is found, which keeps `Tuna (olive oil)` from resolving to a bottle of olive oil. A candidate must match enough of the item's words or **no price is shown**: showing nothing is better than showing the wrong product.
+Item names are matched to retailer product titles by comparing words, so `Weetbix` finds `Weet-Bix`, and `Toilet paper` finds `Toilet Tissues`. When an item has a bracketed qualifier the plain term is searched first and the qualifier is added only if nothing good is found, which keeps `Tuna (olive oil)` from resolving to a bottle of olive oil. Each search keeps the retailer's top 20 candidates, because a qualifier variant can rank below the first handful of hits. A candidate must match enough of the item's words or **no price is shown**: showing nothing is better than showing the wrong product.
+
+An item that was searched and found nothing reads `no price match — refresh, rename or pin this item` instead of staying silent. Rename it to words the retailer uses, pin the product, or press the profile's refresh button to search again.
 
 ### Pinning a product
 

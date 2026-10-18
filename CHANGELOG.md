@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.3
+
+- Keep the retailer's top 20 search candidates instead of 8. A qualifier
+  variant that ranked below the cut matched nothing at all: `Tuna 185g (olive
+  oil)` was silently unpriced even though the store stocks it.
+- Say so when a searched item has no confident match, instead of leaving the
+  row silent: `no price match — refresh, rename or pin this item`.
+
 ## 0.8.2
 
 - Drop the `Price info (automatic; edit notes below):` label from the derived

@@ -1830,3 +1830,58 @@ def test_comparative_unit_price_drops_a_redundant_one() -> None:
         })
         == "$6.98/L"
     )
+
+
+def test_a_qualifier_variant_below_the_first_eight_hits_is_still_found() -> None:
+    """Regression: the olive-oil tuna was silently unpriced.
+
+    The plain term "Tuna 185g" returns relevance-ordered hits, and the
+    olive-oil variant ranks 12th. A candidate pool of 8 cut it off, so the item
+    matched nothing even though the retailer stocks it.
+    """
+
+    from smart_shopping_route.prices import (
+        SEARCH_PAGE_SIZE,
+        PakNSavePriceClient,
+    )
+
+    hits = [
+        "Sealord Smoked Flavour Tuna",
+        "Sealord Chunky Style Tuna In Spring Water",
+        "Pams Tuna Chunks In Soya Oil",
+        "Sealord Sweet Thai Chilli Tuna",
+        "Pams Lemon Pepper Tuna",
+        "Pams Tuna Chunks In Spring Water",
+        "Pams Sweet Thai Chilli Tuna",
+        "Sealord Lemon Pepper Flavour Tuna",
+        "Sealord Tuna In Spring Water",
+        "Pams Tuna In Spring Water",
+        "John West Tuna In Spring Water",
+        "Sealord Olive Oil Blend Tuna",
+    ]
+    body = {
+        "products": [
+            {
+                "productId": f"p{index}",
+                "brand": name.split(" ", 1)[0],
+                "name": name.split(" ", 1)[1],
+                "displayName": "185g",
+                "singlePrice": {"price": 349},
+            }
+            for index, name in enumerate(hits)
+        ]
+    }
+    client = PakNSavePriceClient(SimpleNamespace(), "store-1")
+    client._session = FakeSession([
+        FakeResponse(200, {"access_token": "anon"}),
+        FakeResponse(200, body),
+    ])
+
+    result = asyncio.run(client.async_lookup("Tuna 185g (olive oil)"))
+
+    assert SEARCH_PAGE_SIZE >= len(hits)
+    assert result is not None
+    assert result.product_name == "Sealord Olive Oil Blend Tuna"
+    assert result.price == 3.49
+    search = next(c for c in client._session.calls if "products" in c["url"])
+    assert search["json"]["hitsPerPage"] == SEARCH_PAGE_SIZE

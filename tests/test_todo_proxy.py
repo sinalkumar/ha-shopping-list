@@ -44,8 +44,9 @@ class FakePrices:
     enabled = False
     chain = "none"
 
-    def __init__(self, quotes=None) -> None:
+    def __init__(self, quotes=None, failed=None) -> None:
         self._quotes = quotes or {}
+        self.failed = set(failed or ())
         self.enabled = bool(self._quotes)
 
     def quote_for(self, summary):
@@ -54,7 +55,9 @@ class FakePrices:
     @property
     def snapshot(self):
         return SimpleNamespace(
-            reference_point=lambda _key: None, stale_for=lambda _key: False
+            reference_point=lambda _key: None,
+            stale_for=lambda _key: False,
+            failed=self.failed,
         )
 
 
@@ -301,6 +304,25 @@ def test_priced_item_shows_the_price_directly_above_notes() -> None:
         if not line.startswith("<!-- ssr-price:")
     ]
     assert visible == ["$4.00 · Milk", "", "Buy organic"]
+
+
+def test_a_searched_item_without_a_match_says_so() -> None:
+    """Silence reads as a bug, so an unmatched item explains itself."""
+
+    entity, coordinator = make_entity()
+    coordinator.prices = FakePrices(failed={"milk"})
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+    assert displayed.description.startswith("<!-- ssr-price:start -->\n")
+    assert "no price match — refresh, rename or pin this item" in displayed.description
+
+
+def test_an_item_that_has_not_been_searched_stays_quiet() -> None:
+    """A newly added item is queued, not unmatched: no marker yet."""
+
+    entity, coordinator = make_entity()
+    coordinator.prices = FakePrices()
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+    assert displayed.description is None
 
 
 def test_updating_an_item_strips_only_our_price_block() -> None:

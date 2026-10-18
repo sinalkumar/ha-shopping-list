@@ -38,7 +38,11 @@ MIN_MATCH_SCORE = 0.6
 # matches "strawberry" and "Weet-Bix" matches "Weetbix".
 TOKEN_SIMILARITY = 0.8
 TOKEN_MIN_LENGTH = 4
-SEARCH_PAGE_SIZE = 8
+# Retailer search returns candidates in relevance order and cuts them off at
+# this size. Too small a pool silently loses qualifier variants that rank below
+# the cut: "Tuna 185g" buries "Sealord Olive Oil Blend Tuna 185g" at position
+# 12, so the item matched nothing at all. One request of 20 keeps them.
+SEARCH_PAGE_SIZE = 20
 
 _BROWSER_HEADERS = {
     "User-Agent": (

@@ -135,12 +135,16 @@ class SmartShoppingRouteTodo(TodoListEntity):
         """
 
         quote = self.coordinator.prices.quote_for(item.summary or "")
+        snapshot = self.coordinator.prices.snapshot
+        key = normalize_summary(item.summary or "")
         if quote is None:
+            # A searched item with no confident match is silent otherwise, and
+            # silence reads as a bug. Say so, and say what fixes it.
+            if key in snapshot.failed:
+                return "no price match — refresh, rename or pin this item"
             return None
         parts = [f"${quote.price:.2f}"]
 
-        snapshot = self.coordinator.prices.snapshot
-        key = normalize_summary(item.summary or "")
         if snapshot.stale_for(key):
             parts.append("STALE — refresh prices")
         elif quote.is_special and quote.was_price is not None:
