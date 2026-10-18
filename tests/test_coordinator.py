@@ -600,3 +600,46 @@ def test_price_notification_reaches_entities(monkeypatch) -> None:
     coordinator.prices._async_handle_update_done()
 
     assert sent == [coordinator.price_signal]
+
+
+def test_a_push_refresh_dispatches_the_price_signal_once(monkeypatch) -> None:
+    """The price callback notifies, so explicit dispatch would double it.
+
+    Duplicate dispatches are harmless but make every price-aware entity write
+    state twice per refresh.
+    """
+
+    sent: list[str] = []
+    monkeypatch.setattr(storage_module, "CacheStore", FakeStore)
+    monkeypatch.setattr(
+        coordinator_module, "async_dispatcher_send", lambda _hass, sig: sent.append(sig)
+    )
+    entry = SimpleNamespace(
+        entry_id="synthetic-entry",
+        title="Example Supermarket",
+        data={
+            "profile_name": "Example Supermarket",
+            "sections": SECTIONS,
+            "source_entity_id": "todo.synthetic_source",
+            "ai_task_entity_id": "ai_task.synthetic",
+        },
+        async_on_unload=lambda _cb: None,
+        pref_disable_polling=False,
+    )
+    hass = SimpleNamespace(
+        data={},
+        states=SimpleNamespace(get=lambda _e: None),
+        verify_event_loop_thread=lambda *a, **k: None,
+    )
+    coordinator = coordinator_module.RouteCoordinator(hass, entry)
+
+    # Stand in for a refresh that completes successfully.
+    async def fake_refresh(**_kwargs) -> None:
+        coordinator.prices._async_handle_update_done()
+
+    coordinator.prices.async_refresh = fake_refresh
+    coordinator.prices._client = object()  # enabled
+
+    asyncio.run(coordinator.async_price_refresh())
+
+    assert sent == [coordinator.price_signal]

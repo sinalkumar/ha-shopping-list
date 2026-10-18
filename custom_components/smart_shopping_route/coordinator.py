@@ -231,8 +231,9 @@ class RouteCoordinator:
         self._price_task = None
 
     async def _async_price_then_notify(self) -> None:
+        # Entities are notified by the price coordinator's update callback, so
+        # this deliberately does not dispatch again.
         await self.prices.async_refresh(force=False)
-        self._notify_prices()
 
     @callback
     def _prune_retries(self, items: list[TodoItem]) -> None:
@@ -251,10 +252,9 @@ class RouteCoordinator:
 
     @callback
     def async_notify_prices(self) -> None:
-        async_dispatcher_send(self.hass, self.price_signal)
+        """Single place that tells price-aware entities to re-render."""
 
-    # Kept for internal call sites.
-    _notify_prices = async_notify_prices
+        async_dispatcher_send(self.hass, self.price_signal)
 
     async def async_price_refresh(self) -> None:
         """Re-price the list, keeping already known quotes."""
@@ -262,7 +262,6 @@ class RouteCoordinator:
         if not self.prices.enabled:
             return
         await self.prices.async_refresh()
-        self._notify_prices()
 
     def section_for(self, item: TodoItem) -> str:
         return self.cache.get(item.summary or "", item.uid) or FALLBACK_SECTION
