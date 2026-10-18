@@ -11,9 +11,12 @@ CONF_AI_TASK_ENTITY_ID = "ai_task_entity_id"
 CONF_SECTIONS = "sections"
 CONF_SHOW_COMPLETED = "show_completed"
 CONF_DISPLAY_SECTION_PREFIX = "display_section_prefix"
+CONF_PRICE_CHAIN = "price_chain"
+CONF_PRICE_STORE_ID = "price_store_id"
 
 DEFAULT_SHOW_COMPLETED = False
 DEFAULT_DISPLAY_SECTION_PREFIX = False
+DEFAULT_PRICE_CHAIN = "none"
 FALLBACK_SECTION = "Unclassified / Other"
 
 # Config entry data schema version. Bump together with config_flow.VERSION and
@@ -23,6 +26,11 @@ STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}.cache"
 STORAGE_SAVE_DELAY = 5
 MAX_CACHE_ENTRIES = 2000
+
+# Prices refresh slowly and politely; the route never waits for them.
+PRICE_REFRESH_HOURS = 12
+PRICE_CONCURRENCY = 3
+PRICE_FAILURE_BACKOFF_SECONDS = 3600
 
 AI_TIMEOUT_SECONDS = 45
 AI_CONCURRENCY = 3

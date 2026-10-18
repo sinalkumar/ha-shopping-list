@@ -34,4 +34,5 @@ async def async_get_config_entry_diagnostics(
         "scheduled_retry_count": coordinator.retry_scheduled_count,
         "source_available": coordinator.available,
         "ai_available": coordinator.ai_available,
+        "prices": coordinator.prices.as_diagnostics(),
     }

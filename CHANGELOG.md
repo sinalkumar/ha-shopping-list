@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- Optional price and specials indicator, per profile and off by default. Choose a
+  price source while configuring:
+  - **Woolworths**: price per item plus a real was-price and savings for items on
+    special. Anonymous product search is not store-scoped, so this is the online
+    price.
+  - **Pak'nSave**: per-store price from the Foodstuffs API, which exposes no
+    was-price at all, so no specials are claimed for this chain.
+- Priced items carry a description such as `$8.50 · was $9.70 · Anchor Butter
+  500g`, which the standard to-do card already renders.
+- New **Basket total** and **Specials** sensors; the latter lists each discounted
+  item with its product, price, was-price, savings, and validity text.
+- Prices refresh every 12 hours on an independent coordinator and never block the
+  route. Each item is priced once and reused, and failures back off rather than
+  retrying every cycle.
+
+### Changed
+
+- Item names are now sent to the chosen supermarket when a price source is
+  enabled, in addition to the AI Task provider. This is opt-in per profile and
+  documented in the privacy section; choosing **No prices** keeps item names
+  away from retailers entirely.
+- Product matching compares words, so `Weetbix` finds `Weet-Bix` and
+  `Toilet paper` finds `Toilet Tissues`, and a bracketed qualifier is retried
+  separately so `Tuna (olive oil)` does not resolve to a bottle of olive oil.
+  A candidate must match enough of the item's words or no price is shown, which
+  means a supplement the store does not stock stays unpriced instead of being
+  estimated from an unrelated product.
+
 ## 0.2.0
 
 ### Fixed

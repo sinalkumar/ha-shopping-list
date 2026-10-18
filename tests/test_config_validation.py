@@ -142,6 +142,8 @@ def profile_input(**overrides):
         "sections": "Produce | fruit\nDairy | milk",
         "show_completed": False,
         "display_section_prefix": False,
+        "price_chain": "none",
+        "price_store_id": "",
     }
     data.update(overrides)
     return data
@@ -282,3 +284,136 @@ def test_missing_dependency_returns_base_error(monkeypatch) -> None:
     )
 
     assert result["errors"] == {"base": "source_not_found"}
+
+
+# --- price store resolution -------------------------------------------------
+
+
+def _with_stores(monkeypatch, stores, *, error=None):
+    async def fake_list(_hass):
+        if error is not None:
+            raise error
+        return stores
+
+    monkeypatch.setattr(config_flow, "async_list_paknsave_stores", fake_list)
+
+
+STORES = {
+    "5f167936-79ae-4f6a-b9d2-74afe1bb096b": "PAK'nSAVE Ormiston",
+    "65defcf2-bc15-490e-a84f-1f13b769cd22": "PAK'nSAVE Albany",
+}
+
+
+def test_no_price_chain_keeps_no_store(monkeypatch) -> None:
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES)
+
+    asyncio.run(flow.async_step_user(profile_input(price_chain="none")))
+
+    assert flow.created["data"]["price_store_id"] == ""
+
+
+def test_woolworths_needs_no_store(monkeypatch) -> None:
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES)
+
+    asyncio.run(flow.async_step_user(profile_input(price_chain="woolworths")))
+
+    assert flow.created["data"]["price_store_id"] == ""
+
+
+def test_paknsave_store_resolves_from_a_name(monkeypatch) -> None:
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES)
+
+    asyncio.run(
+        flow.async_step_user(
+            profile_input(price_chain="paknsave", price_store_id="paknsave ormiston")
+        )
+    )
+
+    assert flow.created["data"]["price_store_id"] == (
+        "5f167936-79ae-4f6a-b9d2-74afe1bb096b"
+    )
+
+
+def test_paknsave_store_accepts_an_id(monkeypatch) -> None:
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES)
+
+    asyncio.run(
+        flow.async_step_user(
+            profile_input(
+                price_chain="paknsave",
+                price_store_id="65defcf2-bc15-490e-a84f-1f13b769cd22",
+            )
+        )
+    )
+
+    assert flow.created["data"]["price_store_id"] == (
+        "65defcf2-bc15-490e-a84f-1f13b769cd22"
+    )
+
+
+def test_paknsave_requires_a_store(monkeypatch) -> None:
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES)
+
+    result = asyncio.run(
+        flow.async_step_user(profile_input(price_chain="paknsave", price_store_id=""))
+    )
+
+    assert result["errors"] == {"price_store_id": "price_store_required"}
+
+
+def test_unknown_store_is_rejected(monkeypatch) -> None:
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES)
+
+    result = asyncio.run(
+        flow.async_step_user(
+            profile_input(price_chain="paknsave", price_store_id="PakNSave Nowhere")
+        )
+    )
+
+    assert result["errors"] == {"price_store_id": "price_store_not_found"}
+
+
+def test_ambiguous_store_is_rejected(monkeypatch) -> None:
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES)
+
+    result = asyncio.run(
+        flow.async_step_user(
+            profile_input(price_chain="paknsave", price_store_id="PAK'nSAVE")
+        )
+    )
+
+    assert result["errors"] == {"price_store_id": "price_store_ambiguous"}
+
+
+def test_store_list_failure_is_reported(monkeypatch) -> None:
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES, error=config_flow.PriceError("down"))
+
+    result = asyncio.run(
+        flow.async_step_user(
+            profile_input(price_chain="paknsave", price_store_id="Ormiston")
+        )
+    )
+
+    assert result["errors"] == {"price_store_id": "price_store_unavailable"}
+
+
+def test_price_fields_are_optional_so_existing_profiles_still_work(monkeypatch) -> None:
+    """A profile created before pricing existed must still submit."""
+
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES)
+    data = profile_input()
+    data.pop("price_chain", None)
+    data.pop("price_store_id", None)
+
+    asyncio.run(flow.async_step_user(data))
+
+    assert flow.created["data"]["price_store_id"] == ""

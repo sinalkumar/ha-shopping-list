@@ -11,11 +11,15 @@
           "ai_task_entity_id": "AI Task",
           "sections": "Route sections",
           "show_completed": "Show completed items",
-          "display_section_prefix": "Prefix item names with their section"
+          "display_section_prefix": "Prefix item names with their section",
+          "price_chain": "Price source",
+          "price_store_id": "Store"
         },
         "data_description": {
           "sections": "One section per line: SECTION NAME | optional hints. Line order is the walking route.",
-          "display_section_prefix": "Only changes how the calculated list is displayed. The source list is never renamed."
+          "display_section_prefix": "Only changes how the calculated list is displayed. The source list is never renamed.",
+          "price_chain": "Optional. Adds a price and specials indicator from a New Zealand supermarket. This sends each item name to that retailer's public product search. Choose none to send item names only to the AI Task.",
+          "price_store_id": "Pak'nSave only: store name or ID, because prices differ per store. Leave blank for Woolworths, whose public search is not store-scoped."
         }
       },
       "reconfigure": {
@@ -27,11 +31,15 @@
           "ai_task_entity_id": "AI Task",
           "sections": "Route sections",
           "show_completed": "Show completed items",
-          "display_section_prefix": "Prefix item names with their section"
+          "display_section_prefix": "Prefix item names with their section",
+          "price_chain": "Price source",
+          "price_store_id": "Store"
         },
         "data_description": {
           "sections": "One section per line: SECTION NAME | optional hints. Line order is the walking route.",
-          "display_section_prefix": "Only changes how the calculated list is displayed. The source list is never renamed."
+          "display_section_prefix": "Only changes how the calculated list is displayed. The source list is never renamed.",
+          "price_chain": "Optional. Adds a price and specials indicator from a New Zealand supermarket. This sends each item name to that retailer's public product search. Choose none to send item names only to the AI Task.",
+          "price_store_id": "Pak'nSave only: store name or ID, because prices differ per store. Leave blank for Woolworths, whose public search is not store-scoped."
         }
       }
     },
@@ -47,10 +55,23 @@
       "source_no_update": "The source must support updating to-do items.",
       "ai_task_not_found": "The AI Task entity does not exist.",
       "ai_task_no_generate_data": "The AI Task does not support Generate data.",
-      "duplicate_profile_name": "A profile with this name already exists."
+      "duplicate_profile_name": "A profile with this name already exists.",
+      "price_store_required": "Choose a Pak'nSave store for price lookups.",
+      "price_store_not_found": "No Pak'nSave store matched that name.",
+      "price_store_ambiguous": "More than one store matched; use the store ID.",
+      "price_store_unavailable": "The Pak'nSave store list could not be reached."
     },
     "abort": {
       "reconfigure_successful": "The shopping route was updated."
+    },
+    "selector": {
+      "price_chain": {
+        "options": {
+          "none": "No prices",
+          "woolworths": "Woolworths",
+          "paknsave": "Pak'nSave"
+        }
+      }
     }
   },
   "entity": {
@@ -62,6 +83,12 @@
     "sensor": {
       "unclassified_items": {
         "name": "Unclassified items"
+      },
+      "basket_total": {
+        "name": "Basket total"
+      },
+      "specials": {
+        "name": "Specials"
       }
     }
   },

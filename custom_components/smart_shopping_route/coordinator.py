@@ -31,6 +31,7 @@ from .const import (
     STORAGE_SAVE_DELAY,
 )
 from .models import RouteSection, normalize_summary, section_names
+from .price_coordinator import PriceCoordinator
 from .source_todo import SourceTodoAdapter
 from .storage import async_get_store
 
@@ -49,6 +50,7 @@ class RouteCoordinator:
         self.source = SourceTodoAdapter(hass, entry.data[CONF_SOURCE_ENTITY_ID])
         self.classifier = AITaskClassifier(hass, entry.data[CONF_AI_TASK_ENTITY_ID])
         self.store = async_get_store(hass, entry.entry_id)
+        self.prices = PriceCoordinator(hass, entry, summaries=self._priced_summaries)
         self.cache = ClassificationCache()
         self.items: list[TodoItem] = []
         self.pending: set[str] = set()
@@ -66,6 +68,19 @@ class RouteCoordinator:
     @property
     def signal(self) -> str:
         return f"{DOMAIN}_{self.entry.entry_id}_update"
+
+    @property
+    def price_signal(self) -> str:
+        return f"{DOMAIN}_{self.entry.entry_id}_price_update"
+
+    def _priced_summaries(self) -> list[str]:
+        """Summaries that should carry a price: incomplete items only."""
+
+        return [
+            item.summary
+            for item in self.items
+            if item.summary and item.status != TodoItemStatus.COMPLETED
+        ]
 
     @property
     def available(self) -> bool:
@@ -99,8 +114,10 @@ class RouteCoordinator:
         self._unsub_final_write = self.hass.bus.async_listen_once(
             EVENT_HOMEASSISTANT_FINAL_WRITE, self._async_final_write
         )
+        self.prices.async_setup()
         self._notify()
         self.async_classify_unknown()
+        self._request_prices()
 
     async def async_shutdown(self) -> None:
         self._closed = True
@@ -120,6 +137,7 @@ class RouteCoordinator:
         # removing the entry can delete the file knowing no write follows.
         if self._save_tasks:
             await asyncio.gather(*self._save_tasks, return_exceptions=True)
+        await self.prices.async_shutdown()
         await self.store.async_save(self.cache)
 
     @callback
@@ -183,10 +201,41 @@ class RouteCoordinator:
             self._schedule_save()
         self._notify()
         self.async_classify_unknown()
+        self._request_prices()
+
+    @callback
+    def _request_prices(self) -> None:
+        """Price newly seen items without blocking the route update."""
+
+        if not self.prices.enabled:
+            return
+        task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_price_then_notify(),
+            f"price shopping route items for {self.entry.entry_id}",
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _async_price_then_notify(self) -> None:
+        await self.prices.async_refresh()
+        self._notify_prices()
 
     @callback
     def _notify(self) -> None:
         async_dispatcher_send(self.hass, self.signal)
+
+    @callback
+    def _notify_prices(self) -> None:
+        async_dispatcher_send(self.hass, self.price_signal)
+
+    async def async_price_refresh(self) -> None:
+        """Re-price the list, keeping already known quotes."""
+
+        if not self.prices.enabled:
+            return
+        await self.prices.async_refresh()
+        self._notify_prices()
 
     def section_for(self, item: TodoItem) -> str:
         return self.cache.get(item.summary or "", item.uid) or FALLBACK_SECTION
@@ -280,6 +329,7 @@ class RouteCoordinator:
         self._reset_retries()
         self._notify()
         self.async_classify_unknown()
+        await self.async_price_refresh()
 
     async def async_set_section(self, uid: str, section: str, remember: bool) -> None:
         self._raise_if_closed()

@@ -8,6 +8,7 @@ from homeassistant.components.todo.const import TodoItemStatus, TodoListEntityFe
 
 import smart_shopping_route.todo as todo_module
 from smart_shopping_route.models import RouteSection
+from smart_shopping_route.prices import PriceQuote
 from smart_shopping_route.todo import SmartShoppingRouteTodo
 
 
@@ -35,16 +36,32 @@ class Source:
         self.deleted.append(uids)
 
 
+class FakePrices:
+    """Price stand-in: disabled unless a test overrides it."""
+
+    enabled = False
+    chain = "none"
+
+    def __init__(self, quotes=None) -> None:
+        self._quotes = quotes or {}
+
+    def quote_for(self, summary):
+        return self._quotes.get(summary)
+
+
 class Coordinator:
     available = True
     sections = (RouteSection("Produce"), RouteSection("Dairy"))
 
     def __init__(self) -> None:
         self.source = Source()
+        self.prices = FakePrices()
         self.items = [
             TodoItem(uid="uid-1", summary="Milk", status=TodoItemStatus.NEEDS_ACTION),
             TodoItem(uid="uid-2", summary="Milk", status=TodoItemStatus.NEEDS_ACTION),
         ]
+
+    price_signal = "smart_shopping_route_synthetic-entry_price_update"
 
     def classifications(self) -> dict[str, str]:
         return {"uid:uid-1": "Dairy", "uid:uid-2": "Produce", "milk": "Dairy"}
@@ -174,3 +191,56 @@ def test_entity_uses_coordinator_sections(monkeypatch) -> None:
         )
     )
     assert seen["sections"] == ("Produce", "Dairy", "Unclassified / Other")
+
+
+def test_price_is_rendered_into_the_item_description() -> None:
+    entity, coordinator = make_entity(prefix=True)
+    coordinator.prices = FakePrices({
+        "Milk": PriceQuote(
+            chain="woolworths",
+            product_id="123",
+            product_name="Anchor Butter 500g",
+            price=8.5,
+            was_price=9.7,
+        )
+    })
+
+    descriptions = [item.description for item in entity.todo_items]
+
+    assert descriptions[0] == "$8.50 · was $9.70 · Anchor Butter 500g"
+
+
+def test_plain_price_has_no_was_suffix() -> None:
+    entity, coordinator = make_entity()
+    coordinator.prices = FakePrices({
+        "Milk": PriceQuote(
+            chain="paknsave", product_id="p1", product_name="Pams Milk 2L", price=4.0
+        )
+    })
+
+    assert entity.todo_items[0].description == "$4.00 · Pams Milk 2L"
+
+
+def test_unpriced_items_keep_no_description() -> None:
+    entity, _coordinator = make_entity()
+
+    assert all(item.description is None for item in entity.todo_items)
+
+
+def test_price_lookup_uses_the_undecorated_summary() -> None:
+    """With the prefix on, the summary is decorated but pricing keys off source."""
+
+    entity, coordinator = make_entity(prefix=True)
+    seen: list[str] = []
+
+    class RecordingPrices(FakePrices):
+        def quote_for(self, summary):
+            seen.append(summary)
+            return None
+
+    coordinator.prices = RecordingPrices()
+
+    items = entity.todo_items
+
+    assert len(items) == 2
+    assert seen == ["Milk", "Milk"]

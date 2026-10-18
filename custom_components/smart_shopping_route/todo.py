@@ -88,14 +88,33 @@ class SmartShoppingRouteTodo(TodoListEntity):
                     self.coordinator.section_for(source_item),
                     True,
                 )
+            price = self._price_description(source_item)
+            if price:
+                item.description = price
             decorated.append(item)
         return decorated
+
+    def _price_description(self, item: TodoItem) -> str | None:
+        """Return a short price line, or None when nothing is known."""
+
+        quote = self.coordinator.prices.quote_for(item.summary or "")
+        if quote is None:
+            return None
+        text = f"${quote.price:.2f}"
+        if quote.is_special and quote.was_price is not None:
+            text += f" · was ${quote.was_price:.2f}"
+        return f"{text} · {quote.product_name}"
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass, self.coordinator.signal, self._handle_update
+            )
+        )
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, self.coordinator.price_signal, self._handle_update
             )
         )
         self.async_on_remove(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -15,12 +16,15 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_AI_TASK_ENTITY_ID,
     CONF_DISPLAY_SECTION_PREFIX,
+    CONF_PRICE_CHAIN,
+    CONF_PRICE_STORE_ID,
     CONF_PROFILE_NAME,
     CONF_SECTIONS,
     CONF_SHOW_COMPLETED,
     CONF_SOURCE_ENTITY_ID,
     CONFIG_ENTRY_VERSION,
     DEFAULT_DISPLAY_SECTION_PREFIX,
+    DEFAULT_PRICE_CHAIN,
     DEFAULT_SHOW_COMPLETED,
     DOMAIN,
 )
@@ -31,6 +35,24 @@ from .models import (
     parse_sections,
     serialize_sections,
 )
+from .prices import (
+    CHAIN_PAKNSAVE,
+    CHAINS,
+    PriceError,
+    async_list_paknsave_stores,
+)
+
+
+def _store_key(name: str) -> str:
+    """Normalise a store name for comparison.
+
+    The retailer writes "PAK'nSAVE Ormiston" while people (and the profile
+    titles they already use) write "PakNSave Ormiston", so apostrophes and
+    punctuation must not affect matching.
+    """
+
+    return " ".join(re.sub(r"[^\w\s]+", "", normalize_summary(name)).split())
+
 
 DEFAULT_SECTIONS = """Produce | fruit and vegetables
 Bakery | bread and bakery
@@ -68,17 +90,23 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     raise ValueError("empty_profile_name")
                 sections = parse_sections(user_input[CONF_SECTIONS])
                 self._validate_entities(user_input)
+                price_store_id = await self._async_resolve_store(user_input)
             except RouteParseError as err:
                 errors[CONF_SECTIONS] = err.code
             except ValueError as err:
                 key = str(err)
-                errors[CONF_PROFILE_NAME if key == "empty_profile_name" else "base"] = (
-                    key
-                )
+                if key == "empty_profile_name":
+                    field = CONF_PROFILE_NAME
+                elif key.startswith("price_store"):
+                    field = CONF_PRICE_STORE_ID
+                else:
+                    field = "base"
+                errors[field] = key
             else:
                 data = {
                     **user_input,
                     CONF_PROFILE_NAME: name,
+                    CONF_PRICE_STORE_ID: price_store_id,
                     CONF_SECTIONS: [
                         {"name": section.name, "hints": section.hints}
                         for section in sections
@@ -130,6 +158,20 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_DISPLAY_SECTION_PREFIX, DEFAULT_DISPLAY_SECTION_PREFIX
                 ),
             ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_PRICE_CHAIN,
+                default=defaults.get(CONF_PRICE_CHAIN, DEFAULT_PRICE_CHAIN),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=list(CHAINS),
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    translation_key="price_chain",
+                )
+            ),
+            vol.Optional(
+                CONF_PRICE_STORE_ID,
+                default=defaults.get(CONF_PRICE_STORE_ID, ""),
+            ): selector.TextSelector(),
         })
         return self.async_show_form(
             step_id="reconfigure" if reconfigure else "user",
@@ -153,6 +195,44 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if normalize_summary(str(existing)) == wanted:
                 return True
         return False
+
+    async def _async_resolve_store(self, user_input: dict[str, Any]) -> str:
+        """Resolve the store selection into a retailer store ID.
+
+        Pak'nSave prices differ per store, so a store is required there and is
+        resolved from a name or ID. Woolworths' anonymous search is not
+        store-scoped, so no store is kept for it.
+        """
+
+        chain = user_input.get(CONF_PRICE_CHAIN, DEFAULT_PRICE_CHAIN)
+        store = str(user_input.get(CONF_PRICE_STORE_ID) or "").strip()
+        if chain != CHAIN_PAKNSAVE:
+            return ""
+        if not store:
+            raise ValueError("price_store_required")
+        try:
+            stores = await async_list_paknsave_stores(self.hass)
+        except PriceError as err:
+            raise ValueError("price_store_unavailable") from err
+        if store in stores:
+            return store
+        wanted = _store_key(store)
+        matches = [
+            store_id
+            for store_id, store_name in stores.items()
+            if _store_key(store_name) == wanted
+        ]
+        if not matches:
+            matches = [
+                store_id
+                for store_id, store_name in stores.items()
+                if wanted in _store_key(store_name)
+            ]
+        if not matches:
+            raise ValueError("price_store_not_found")
+        if len(matches) > 1:
+            raise ValueError("price_store_ambiguous")
+        return matches[0]
 
     def _validate_entities(self, user_input: dict[str, Any]) -> None:
         source_id = user_input[CONF_SOURCE_ENTITY_ID]

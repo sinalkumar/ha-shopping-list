@@ -33,6 +33,15 @@ ALLOWED_KEYS = {
     "scheduled_retry_count",
     "source_available",
     "ai_available",
+    "prices",
+}
+
+PRICE_KEYS = {
+    "chain",
+    "enabled",
+    "priced_items",
+    "unmatched_items",
+    "scheduled_retries",
 }
 
 
@@ -45,6 +54,43 @@ class FakeStore:
 
     async def async_save(self, cache) -> None:
         pass
+
+
+class FakePriceCoordinator:
+    enabled = False
+    chain = "none"
+
+    def __init__(self, _hass, _entry, *, summaries) -> None:
+        pass
+
+    def async_setup(self) -> None:
+        return None
+
+    async def async_refresh(self) -> None:
+        return None
+
+    async def async_shutdown(self) -> None:
+        return None
+
+    def quote_for(self, _summary):
+        return None
+
+    def as_diagnostics(self):
+        return {
+            "chain": self.chain,
+            "enabled": self.enabled,
+            "priced_items": 0,
+            "unmatched_items": 0,
+            "scheduled_retries": 0,
+        }
+
+    @property
+    def snapshot(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            quotes={}, failed=set(), specials=[], savings=0.0, total=0.0
+        )
 
 
 class FakeSource:
@@ -73,6 +119,7 @@ class FakeSource:
 
 def build(monkeypatch):
     monkeypatch.setattr(storage_module, "CacheStore", FakeStore)
+    monkeypatch.setattr(coordinator_module, "PriceCoordinator", FakePriceCoordinator)
     monkeypatch.setattr(coordinator_module, "async_dispatcher_send", lambda *a: None)
     entry = SimpleNamespace(
         entry_id="synthetic-entry",
@@ -112,6 +159,7 @@ def test_diagnostics_expose_only_aggregate_keys(monkeypatch) -> None:
     result = asyncio.run(async_get_config_entry_diagnostics(hass, entry))
 
     assert set(result) == ALLOWED_KEYS
+    assert set(result["prices"]) == PRICE_KEYS
     serialized = repr(result)
     for private in (
         PRIVATE_ITEM,

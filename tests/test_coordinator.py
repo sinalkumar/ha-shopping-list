@@ -62,6 +62,34 @@ class FakeSource:
         self.listener(self.items())
 
 
+class FakePriceCoordinator:
+    """Route tests do not exercise pricing; price tests cover it directly."""
+
+    enabled = False
+    chain = "none"
+
+    def __init__(self, _hass, _entry, *, summaries) -> None:
+        self._summaries = summaries
+
+    def async_setup(self) -> None:
+        return None
+
+    async def async_refresh(self) -> None:
+        return None
+
+    async def async_shutdown(self) -> None:
+        return None
+
+    def quote_for(self, _summary):
+        return None
+
+    @property
+    def snapshot(self):
+        return SimpleNamespace(
+            quotes={}, failed=set(), specials=[], savings=0.0, total=0.0
+        )
+
+
 class FakeClassifier:
     """Records every provider call and replays scripted answers."""
 
@@ -76,9 +104,11 @@ class FakeClassifier:
 
 def make_coordinator(items, monkeypatch, *, ai_state="unknown", answer=("Dairy", 0.9)):
     monkeypatch.setattr(storage_module, "CacheStore", FakeStore)
+    monkeypatch.setattr(coordinator_module, "PriceCoordinator", FakePriceCoordinator)
     monkeypatch.setattr(coordinator_module, "async_dispatcher_send", lambda *a: None)
     entry = SimpleNamespace(
         entry_id="synthetic-entry",
+        title="Example Supermarket",
         data={
             "profile_name": "Example Supermarket",
             "sections": SECTIONS,
@@ -336,8 +366,10 @@ def test_shutdown_flushes_cache_and_cancels_tasks(monkeypatch) -> None:
 
 def test_section_names_tolerate_extra_persisted_keys(monkeypatch) -> None:
     monkeypatch.setattr(storage_module, "CacheStore", FakeStore)
+    monkeypatch.setattr(coordinator_module, "PriceCoordinator", FakePriceCoordinator)
     entry = SimpleNamespace(
         entry_id="synthetic-entry",
+        title="Example Supermarket",
         data={
             "profile_name": "Example Supermarket",
             "sections": [{"name": "Produce", "hints": "fruit", "future_key": 1}],
