@@ -225,7 +225,11 @@ def test_price_is_rendered_with_size_and_unit_price() -> None:
     assert (
         "$8.50 · was $9.70 · 500g · $1.70/100g · Anchor Butter 500g" in descriptions[0]
     )
-    assert "automatic; edit notes below" in descriptions[0]
+    # The generated block is marked, but carries no visible label: a prefix
+    # repeated on every row wrapped the native list onto an extra line.
+    assert descriptions[0].startswith("<!-- ssr-price:start -->\n$8.50 · was $9.70")
+    assert "automatic" not in descriptions[0]
+    assert "edit notes" not in descriptions[0]
 
 
 def test_plain_price_has_no_was_suffix() -> None:
@@ -279,6 +283,24 @@ def test_description_is_advertised_even_when_the_source_lacks_it() -> None:
     assert entity.supported_features & int(
         TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
     )
+
+
+def test_priced_item_shows_the_price_directly_above_notes() -> None:
+    """The native list shows the price, not a repeated label, then the notes."""
+
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features |= int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+    coordinator.items[0].description = "Buy organic"
+    coordinator.prices = FakePrices({"Milk": PriceQuote("paknsave", "1", "Milk", 4)})
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+    visible = [
+        line
+        for line in displayed.description.splitlines()
+        if not line.startswith("<!-- ssr-price:")
+    ]
+    assert visible == ["$4.00 · Milk", "", "Buy organic"]
 
 
 def test_updating_an_item_strips_only_our_price_block() -> None:

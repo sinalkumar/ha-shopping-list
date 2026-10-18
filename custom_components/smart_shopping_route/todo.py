@@ -107,10 +107,14 @@ class SmartShoppingRouteTodo(TodoListEntity):
                 )
             price = self._price_description(source_item)
             if price:
-                generated = f"Price info (automatic; edit notes below): {price}"
-                checksum = sha256(generated.encode()).hexdigest()
+                # No visible label: the price line describes itself, and a
+                # 45-character prefix wrapped every row onto an extra line in
+                # the native list. The HTML comments keep the block
+                # machine-checkable and invisible, and edits to the price are
+                # still rejected with an explanation of what to change.
+                checksum = sha256(price.encode()).hexdigest()
                 item.description = (
-                    f"<!-- ssr-price:start -->\n{generated}\n"
+                    f"<!-- ssr-price:start -->\n{price}\n"
                     f"<!-- ssr-price:sha256={checksum} -->\n"
                     f"<!-- ssr-price:end -->"
                     + (

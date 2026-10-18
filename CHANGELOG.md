@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.2
+
+- Drop the `Price info (automatic; edit notes below):` label from the derived
+  list. The price line is shown on its own, so rows no longer wrap onto an extra
+  line in the native to-do list. The block stays integrity-checked and invisible
+  to readers, and editing the price is still rejected with an explanation.
+
 ## 0.8.1
 
 - Show paper comparisons per 100 sheets rather than rounding each sheet to
