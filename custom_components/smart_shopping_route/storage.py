@@ -6,7 +6,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
 
 from .cache import ClassificationCache
-from .const import DOMAIN, STORAGE_KEY_PREFIX, STORAGE_VERSION
+from .const import (
+    DOMAIN,
+    PRICE_STORAGE_KEY_PREFIX,
+    STORAGE_KEY_PREFIX,
+    STORAGE_VERSION,
+)
 
 STORES_DATA_KEY = f"{DOMAIN}_stores"
 
@@ -30,6 +35,29 @@ class CacheStore:
     async def async_remove(self) -> None:
         """Delete the stored cache and cancel this instance's pending writes."""
 
+        await self._store.async_remove()
+
+
+class PriceStore:
+    """Persist product pins and price history for one profile.
+
+    History is persisted because "down since last check" is only meaningful if
+    it survives a restart; pins are persisted because they are user decisions.
+    """
+
+    def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
+        self._store: Store[dict] = Store(
+            hass, STORAGE_VERSION, f"{PRICE_STORAGE_KEY_PREFIX}.{entry_id}"
+        )
+
+    async def async_load(self) -> dict:
+        data = await self._store.async_load()
+        return data if isinstance(data, dict) else {}
+
+    async def async_save(self, data: dict) -> None:
+        await self._store.async_save(data)
+
+    async def async_remove(self) -> None:
         await self._store.async_remove()
 
 

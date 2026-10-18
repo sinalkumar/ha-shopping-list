@@ -20,6 +20,8 @@ from homeassistant.helpers.target import (
 from .const import (
     ATTR_INCLUDE_MANUAL,
     ATTR_ITEM_UID,
+    ATTR_PRODUCT_ID,
+    ATTR_QUERY,
     ATTR_REMEMBER,
     ATTR_SECTION,
     CONFIG_ENTRY_VERSION,
@@ -27,13 +29,15 @@ from .const import (
     PLATFORMS,
     SERVICE_CLEAR_CACHE,
     SERVICE_FORGET_ITEM_SECTION,
+    SERVICE_PIN_ITEM_PRODUCT,
     SERVICE_RECLASSIFY_ALL,
     SERVICE_REFRESH,
     SERVICE_SET_ITEM_SECTION,
+    SERVICE_UNPIN_ITEM_PRODUCT,
 )
 from .coordinator import RouteCoordinator
 from .models import section_names
-from .storage import async_pop_store
+from .storage import PriceStore, async_pop_store
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -69,6 +73,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             SERVICE_FORGET_ITEM_SECTION,
             SERVICE_RECLASSIFY_ALL,
             SERVICE_CLEAR_CACHE,
+            SERVICE_PIN_ITEM_PRODUCT,
+            SERVICE_UNPIN_ITEM_PRODUCT,
         ):
             hass.services.async_remove(DOMAIN, service)
     return True
@@ -85,6 +91,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     # final-write listener per instance, so a fresh Store could not prevent a
     # pending write from recreating the file during shutdown.
     await async_pop_store(hass, entry.entry_id).async_remove()
+    # Pins and price history are user data too, and must not outlive the profile.
+    await PriceStore(hass, entry.entry_id).async_remove()
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -156,6 +164,30 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def reclassify(call: ServiceCall) -> None:
         await _coordinator_for_call(hass, call).async_reclassify_all()
 
+    async def pin_product(call: ServiceCall) -> None:
+        coordinator = _coordinator_for_call(hass, call)
+        if not coordinator.prices.enabled:
+            raise ServiceValidationError("Pricing is not enabled for this route")
+        try:
+            item = coordinator.item_by_uid(_item_uid(call))
+            await coordinator.prices.async_pin(
+                item.summary or "",
+                query=call.data.get(ATTR_QUERY, ""),
+                product_id=call.data.get(ATTR_PRODUCT_ID),
+            )
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+        coordinator.async_notify_prices()
+
+    async def unpin_product(call: ServiceCall) -> None:
+        coordinator = _coordinator_for_call(hass, call)
+        try:
+            item = coordinator.item_by_uid(_item_uid(call))
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+        await coordinator.prices.async_unpin(item.summary or "")
+        coordinator.async_notify_prices()
+
     async def clear(call: ServiceCall) -> None:
         await _coordinator_for_call(hass, call).async_clear_cache(
             call.data[ATTR_INCLUDE_MANUAL]
@@ -190,6 +222,24 @@ def _async_register_services(hass: HomeAssistant) -> None:
         SERVICE_RECLASSIFY_ALL,
         reclassify,
         schema=cv.make_entity_service_schema({}),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PIN_ITEM_PRODUCT,
+        pin_product,
+        schema=cv.make_entity_service_schema({
+            vol.Required(ATTR_ITEM_UID): cv.string,
+            vol.Optional(ATTR_QUERY, default=""): cv.string,
+            vol.Optional(ATTR_PRODUCT_ID): cv.string,
+        }),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_UNPIN_ITEM_PRODUCT,
+        unpin_product,
+        schema=cv.make_entity_service_schema({
+            vol.Required(ATTR_ITEM_UID): cv.string,
+        }),
     )
     hass.services.async_register(
         DOMAIN,

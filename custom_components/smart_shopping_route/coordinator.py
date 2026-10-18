@@ -115,6 +115,7 @@ class RouteCoordinator:
         self._unsub_final_write = self.hass.bus.async_listen_once(
             EVENT_HOMEASSISTANT_FINAL_WRITE, self._async_final_write
         )
+        await self.prices.async_load()
         self.prices.async_setup()
         self._notify()
         self.async_classify_unknown()
@@ -233,8 +234,11 @@ class RouteCoordinator:
         async_dispatcher_send(self.hass, self.signal)
 
     @callback
-    def _notify_prices(self) -> None:
+    def async_notify_prices(self) -> None:
         async_dispatcher_send(self.hass, self.price_signal)
+
+    # Kept for internal call sites.
+    _notify_prices = async_notify_prices
 
     async def async_price_refresh(self) -> None:
         """Re-price the list, keeping already known quotes."""

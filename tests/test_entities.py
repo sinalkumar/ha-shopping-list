@@ -193,6 +193,7 @@ class PricedCoordinator(Coordinator):
                 unmatched_count=1,
                 priced_count=2,
                 specials=[("butter", SPECIAL_QUOTE)],
+                drops=[],
                 quotes={"butter": SPECIAL_QUOTE, "milk": PLAIN_QUOTE},
             ),
             quote_for=lambda _summary: None,
@@ -252,3 +253,47 @@ def test_price_sensors_are_grouped_under_the_profile_device() -> None:
             ("smart_shopping_route", "synthetic-entry")
         }
         assert sensor.available is True
+
+
+def test_price_sensors_are_not_created_without_pricing() -> None:
+    """Upgrading a route-only profile must not add unavailable sensors."""
+
+    import asyncio as _asyncio
+
+    import smart_shopping_route.sensor as sensor_module
+    from smart_shopping_route.const import DOMAIN
+
+    coordinator = Coordinator()
+    added: list = []
+
+    def add(entities):
+        added.extend(entities)
+
+    hass = SimpleNamespace(data={DOMAIN: {"synthetic-entry": coordinator}})
+
+    _asyncio.run(sensor_module.async_setup_entry(hass, entry(), add))
+
+    assert [type(entity).__name__ for entity in added] == ["UnclassifiedSensor"]
+
+
+def test_price_sensors_are_created_when_pricing_is_on() -> None:
+    import asyncio as _asyncio
+
+    import smart_shopping_route.sensor as sensor_module
+    from smart_shopping_route.const import DOMAIN
+
+    coordinator = PricedCoordinator()
+    added: list = []
+
+    def add(entities):
+        added.extend(entities)
+
+    hass = SimpleNamespace(data={DOMAIN: {"synthetic-entry": coordinator}})
+
+    _asyncio.run(sensor_module.async_setup_entry(hass, entry(), add))
+
+    assert [type(entity).__name__ for entity in added] == [
+        "UnclassifiedSensor",
+        "BasketTotalSensor",
+        "SpecialsSensor",
+    ]

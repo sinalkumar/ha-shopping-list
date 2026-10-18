@@ -24,6 +24,7 @@ FALLBACK_SECTION = "Unclassified / Other"
 CONFIG_ENTRY_VERSION = 1
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}.cache"
+PRICE_STORAGE_KEY_PREFIX = f"{DOMAIN}.prices"
 STORAGE_SAVE_DELAY = 5
 MAX_CACHE_ENTRIES = 2000
 
@@ -31,6 +32,8 @@ MAX_CACHE_ENTRIES = 2000
 PRICE_REFRESH_HOURS = 12
 PRICE_CONCURRENCY = 3
 PRICE_FAILURE_BACKOFF_SECONDS = 3600
+# Price history is persisted, so it must be bounded like the classification cache.
+PRICE_HISTORY_MAX = 500
 
 AI_TIMEOUT_SECONDS = 45
 AI_CONCURRENCY = 3
@@ -46,8 +49,13 @@ SERVICE_SET_ITEM_SECTION = "set_item_section"
 SERVICE_FORGET_ITEM_SECTION = "forget_item_section"
 SERVICE_RECLASSIFY_ALL = "reclassify_all"
 SERVICE_CLEAR_CACHE = "clear_cache"
+SERVICE_PIN_ITEM_PRODUCT = "pin_item_product"
+SERVICE_UNPIN_ITEM_PRODUCT = "unpin_item_product"
 
 ATTR_ITEM_UID = "item_uid"
 ATTR_SECTION = "section"
 ATTR_REMEMBER = "remember"
 ATTR_INCLUDE_MANUAL = "include_manual"
+ATTR_PRODUCT_ID = "product_id"
+ATTR_QUERY = "query"
+ATTR_CHAIN = "chain"

@@ -110,9 +110,35 @@ Prices refresh every 12 hours on their own schedule, and each item is priced onc
 
 ### Matching
 
-Item names are matched to retailer product titles by comparing words, so `Weetbix` finds `Weet-Bix`, and `Toilet paper` finds `Toilet Tissues`. When an item has a bracketed qualifier the plain term is searched first and the qualifier is added only if nothing good is found, which keeps `Tuna (olive oil)` from resolving to a bottle of olive oil. A candidate must match enough of the item's words or **no price is shown**: showing nothing is better than showing the wrong product. A supplement the store does not stock therefore stays unpriced.
+Item names are matched to retailer product titles by comparing words, so `Weetbix` finds `Weet-Bix`, and `Toilet paper` finds `Toilet Tissues`. When an item has a bracketed qualifier the plain term is searched first and the qualifier is added only if nothing good is found, which keeps `Tuna (olive oil)` from resolving to a bottle of olive oil. A candidate must match enough of the item's words or **no price is shown**: showing nothing is better than showing the wrong product.
 
-Known limits: no confidence is expressed per item, there is no manual pin yet, and Pak'nSave prices are per store, so a profile is tied to the store chosen at setup.
+### Pinning a product
+
+Household shorthand rarely looks like a product title. When automatic matching cannot find something, pin it once and the pin persists across restarts:
+
+```yaml
+action: smart_shopping_route.pin_item_product
+target:
+  entity_id: todo.woolworths_manukau_mall
+data:
+  item_uid: "0123456789abcdef0123456789abcdef"
+  query: Kids Multivitamin Gummies
+  product_id: "1234567"
+```
+
+- `query` is searched instead of the item name. This alone is usually enough: `Kids vitamins` plus `Kids Multivitamin Gummies` resolves to *Example Brand Kids Multivitamin Gummies 110 Pack*.
+- `product_id` is optional and pins one exact product. With it set, only that product is accepted, so the 30-pack and 110-pack of the same gummies can never be confused. If the retailer stops stocking it, no price is shown rather than a near-miss being substituted.
+- `unpin_item_product` forgets the decision and returns to automatic matching.
+
+Pins are per profile and per chain, because each retailer has its own catalogue. A pin survives the item being ticked off and added again.
+
+### Price drops
+
+Woolworths publishes a real was-price, so specials are detected from it. Pak'nSave publishes none at all, so for that chain the reference is **our own previous reading**: an item is reported as a drop when it is cheaper than the last time we priced it. That is why the Specials sensor reports a count from both signals, and its attributes separate `items` (retailer specials) from `price_drops` (falls since the last reading).
+
+Price history and pins are stored in `.storage/smart_shopping_route.prices.<entry_id>` so a restart does not reset them, and both are deleted when the profile is removed.
+
+Known limits: Pak'nSave prices are per store, so a profile is tied to the store chosen at setup, and the drop signal only becomes meaningful after the first price change.
 
 ## Cache, retries, and failure handling
 
@@ -146,7 +172,7 @@ Locally, the profile cache persists normalized item summaries and their sections
 - **Items stay unclassified:** test the selected AI Task in Home Assistant, press the refresh button, and inspect sanitized Home Assistant logs. The status sensor's `pending_classifications` and `scheduled_retries` attributes show whether work is queued or backing off.
 - **Wrong section:** call `set_item_section` with the source UID and `remember: true`.
 - **An item shows no price:** the retailer's search had no confident match. Rename the item to something closer to a product title, or accept it staying unpriced. `unmatched_items` on the basket total sensor shows how many are in that state.
-- **Prices look like the wrong product:** this is the main failure mode of automatic matching. The comparison prefers the retailer's own relevance order, so the plainest product usually wins, but a manual pin is not implemented yet.
+- **Prices look like the wrong product:** pin the item with `pin_item_product` and, if needed, its exact `product_id`. Matching prefers the retailer's own relevance order, so the plainest product usually wins, but shorthand and supplements still need a pin.
 - **Changed hints:** call `reclassify_all` if you want new classifications; route order changes alone need no reclassification.
 - **Debugging:** enable debug logging for `custom_components.smart_shopping_route`. Logs intentionally omit item summaries.
 
@@ -158,6 +184,7 @@ Locally, the profile cache persists normalized item summaries and their sections
 - Corrections are keyed by source UID, which the calculated list does not display.
 - Home Assistant 2026.8 still requires an isolated internal `EntityComponent` lookup to obtain the source Todo entity for push subscriptions.
 - Prices are estimates from public product search, not a quote. Quantities in item names are not interpreted, so `2x milk` is priced as one unit.
+- Price drops compare against the previous reading only, not a long trend, so a price that fell before the feature was enabled is not reported.
 - Woolworths prices are the online price and are not tied to a physical store.
 - No manual product pin yet, and no price history beyond the current reading for Pak'nSave.
 

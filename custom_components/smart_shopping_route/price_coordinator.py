@@ -26,10 +26,12 @@ from .const import (
     DOMAIN,
     PRICE_CONCURRENCY,
     PRICE_FAILURE_BACKOFF_SECONDS,
+    PRICE_HISTORY_MAX,
     PRICE_REFRESH_HOURS,
 )
 from .models import normalize_summary
-from .prices import PriceClient, PriceError, PriceQuote, create_client
+from .prices import PriceClient, PriceError, PriceQuote, ProductPin, create_client
+from .storage import PriceStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,8 +43,12 @@ class PriceSnapshot:
     quotes: dict[str, PriceQuote] = field(default_factory=dict)
     cheapest_seen: dict[str, float] = field(default_factory=dict)
     previous: dict[str, float] = field(default_factory=dict)
+    # Drops are an event of the refresh that observed them, so a price that
+    # stays low is not reported as falling again on every later refresh.
+    drops_now: dict[str, float] = field(default_factory=dict)
     failed: set[str] = field(default_factory=set)
     active: dict[str, int] = field(default_factory=dict)
+    pinned: set[str] = field(default_factory=set)
 
     def _active_quotes(self) -> list[tuple[str, int, PriceQuote]]:
         """Yield one entry per listed item, honouring duplicate summaries."""
@@ -76,6 +82,23 @@ class PriceSnapshot:
             2,
         )
 
+    def drop_for(self, key: str) -> float | None:
+        """Return how far the price fell in the last refresh, if it did.
+
+        This is the only specials signal available for a chain that publishes no
+        was-price, because the comparison comes from our own history.
+        """
+
+        return self.drops_now.get(key)
+
+    @property
+    def drops(self) -> list[tuple[str, PriceQuote, float]]:
+        return [
+            (key, quote, drop)
+            for key, drop in self.drops_now.items()
+            if (quote := self.quotes.get(key)) is not None and not quote.is_special
+        ]
+
     @property
     def priced_count(self) -> int:
         return sum(count for _key, count, _quote in self._active_quotes())
@@ -106,6 +129,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._update_task: asyncio.Task[Any] | None = None
         self._force_full = False
         self._closed = False
+        self._pins: dict[str, ProductPin] = {}
+        self._price_store = PriceStore(hass, entry.entry_id)
         self._unsub_listener: CALLBACK_TYPE | None = None
         super().__init__(
             hass,
@@ -120,6 +145,12 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
     @property
     def enabled(self) -> bool:
         return self._client is not None
+
+    @property
+    def _chain_key(self) -> str:
+        """Chain identity used for pin comparison, normalised once."""
+
+        return self.chain or ""
 
     def async_setup(self) -> None:
         """Create the retailer client and start the refresh interval.
@@ -143,6 +174,93 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         if self._unsub_listener is None:
             self._unsub_listener = self.async_add_listener(lambda: None)
 
+    async def async_load(self) -> None:
+        """Restore pins and price history before the first reading."""
+
+        data = await self._price_store.async_load()
+        pins = data.get("pins") if isinstance(data.get("pins"), dict) else {}
+        self._pins = {}
+        for key, value in pins.items():
+            if not isinstance(value, dict):
+                continue
+            # Pins are per retailer: a product ID or search phrase pinned at
+            # Woolworths is meaningless at Pak'nSave, and reusing it after a
+            # reconfigure would price the wrong product. The stored chain must
+            # be compared as persisted, before it is overwritten with the
+            # profile's current chain.
+            if (value.get("chain") or "") != self._chain_key:
+                _LOGGER.debug("Dropping a pin recorded for a different chain")
+                continue
+            self._pins[key] = ProductPin.from_dict(self._chain_key, value)
+        history = data.get("history")
+        if isinstance(history, dict):
+            for key, entry in history.items():
+                if not isinstance(entry, dict):
+                    continue
+                cheapest = entry.get("cheapest")
+                previous = entry.get("previous")
+                if isinstance(cheapest, (int, float)):
+                    self._snapshot.cheapest_seen[key] = float(cheapest)
+                if isinstance(previous, (int, float)):
+                    self._snapshot.previous[key] = float(previous)
+
+    async def _async_persist(self) -> None:
+        await self._price_store.async_save({
+            "pins": {key: pin.as_dict() for key, pin in self._pins.items()},
+            "history": {
+                key: {
+                    "cheapest": cheapest,
+                    **(
+                        {"previous": self._snapshot.previous[key]}
+                        if key in self._snapshot.previous
+                        else {}
+                    ),
+                }
+                for key, cheapest in self._snapshot.cheapest_seen.items()
+            },
+        })
+
+    async def async_pin(
+        self,
+        summary: str,
+        *,
+        query: str = "",
+        product_id: str | None = None,
+        product_name: str | None = None,
+    ) -> None:
+        """Pin the product an item means, then re-price just that item."""
+
+        key = normalize_summary(summary)
+        if not key:
+            raise ValueError("Item has no summary to pin")
+        self._pins[key] = ProductPin(
+            chain=self._chain_key,
+            query=query.strip(),
+            product_id=product_id,
+            product_name=product_name,
+        )
+        # Forget what we concluded before; the pin replaces it.
+        self._snapshot.quotes.pop(key, None)
+        self._snapshot.failed.discard(key)
+        self._backoff_until.pop(key, None)
+        self._attempts.pop(key, None)
+        await self._async_persist()
+        await self.async_refresh()
+
+    async def async_unpin(self, summary: str) -> None:
+        key = normalize_summary(summary)
+        if self._pins.pop(key, None) is None:
+            return
+        self._snapshot.quotes.pop(key, None)
+        self._snapshot.failed.discard(key)
+        self._backoff_until.pop(key, None)
+        self._attempts.pop(key, None)
+        await self._async_persist()
+        await self.async_refresh()
+
+    def pin_for(self, summary: str) -> ProductPin | None:
+        return self._pins.get(normalize_summary(summary))
+
     async def async_shutdown(self) -> None:
         """Stop refreshing and make sure no update outlives the profile."""
 
@@ -159,6 +277,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         self._update_task = None
+        if self._pins or self._snapshot.cheapest_seen:
+            await self._async_persist()
 
     async def async_refresh(self, *, force: bool = True) -> None:  # type: ignore[override]
         """Refresh under a tracked task so shutdown can cancel it.
@@ -189,6 +309,12 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             await super().async_refresh()
         except UpdateFailed:
             _LOGGER.debug("Price refresh failed; keeping previous quotes")
+            return
+        # History is the only specials signal for a chain with no was-price, and
+        # Home Assistant shutdown does not unload entries, so it must be written
+        # when it changes rather than only on unload.
+        if self._snapshot.cheapest_seen or self._pins:
+            await self._async_persist()
 
     async def _handle_refresh_interval(self, _now: Any = None) -> None:
         """Re-price everything on the slow interval, not just new items."""
@@ -212,6 +338,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             active[key] += 1
             first_summary.setdefault(key, summary)
         self._snapshot.active = dict(active)
+        self._snapshot.drops_now.clear()
 
         force = self._force_full
         self._force_full = False
@@ -240,9 +367,14 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 if isinstance(result, BaseException)
                 and not isinstance(result, PriceError)
             ]
-            for result in unexpected:
+            if unexpected:
+                # One line per cycle, not per item: a retailer changing its
+                # response shape must not emit a warning for every item on
+                # every refresh.
                 _LOGGER.warning(
-                    "Price lookup raised unexpectedly: %s", type(result).__name__
+                    "Price lookup failed unexpectedly for %s item(s): %s",
+                    len(unexpected),
+                    ", ".join(sorted({type(err).__name__ for err in unexpected})),
                 )
             if transport_failures and transport_failures == len(results):
                 # Every request failed: report a real failure so Home Assistant
@@ -272,13 +404,35 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             if key not in active:
                 self._backoff_until.pop(key, None)
                 self._attempts.pop(key, None)
+        # Pins outlive their item on purpose: a household shorthand recurs, and
+        # a user decision should not evaporate when the item is ticked off.
+        self._snapshot.pinned &= active | set(self._pins)
+        self._trim_history(active)
+
+    def _trim_history(self, active: set[str]) -> None:
+        """Bound persisted price history, dropping off-list entries first."""
+
+        for store in (self._snapshot.cheapest_seen, self._snapshot.previous):
+            excess = len(store) - PRICE_HISTORY_MAX
+            if excess <= 0:
+                continue
+            for key in [key for key in store if key not in active][:excess]:
+                store.pop(key, None)
+            excess = len(store) - PRICE_HISTORY_MAX
+            for key in list(store)[: max(0, excess)]:
+                store.pop(key, None)
 
     async def _async_price_one(self, key: str, summary: str) -> None:
         assert self._client is not None
         try:
             async with self._semaphore:
-                quote = await self._client.async_lookup(summary)
+                quote = await self._client.async_lookup(summary, self._pins.get(key))
         except PriceError:
+            self._schedule_retry(key)
+            raise
+        except Exception:
+            # An unexpected error (a changed response shape, say) still needs
+            # backoff, otherwise every source push retries it.
             self._schedule_retry(key)
             raise
         if self._closed:
@@ -294,6 +448,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._snapshot.failed.discard(key)
         self._record_history(key, quote)
         self._snapshot.quotes[key] = quote
+        if key in self._pins:
+            self._snapshot.pinned.add(key)
 
     def _record_history(self, key: str, quote: PriceQuote) -> None:
         """Record history from the previously known quote, before replacing it."""
@@ -301,6 +457,10 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         previous = self._snapshot.quotes.get(key)
         if previous is not None and previous.price != quote.price:
             self._snapshot.previous[key] = previous.price
+            if previous.price > quote.price and not quote.is_special:
+                self._snapshot.drops_now[key] = round(previous.price - quote.price, 2)
+            else:
+                self._snapshot.drops_now.pop(key, None)
         cheapest = self._snapshot.cheapest_seen.get(key)
         if cheapest is None or quote.price < cheapest:
             self._snapshot.cheapest_seen[key] = quote.price
@@ -331,4 +491,5 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "priced_items": self._snapshot.priced_count,
             "unmatched_items": self._snapshot.unmatched_count,
             "scheduled_retries": len(self._backoff_until),
+            "pinned_items": len(self._pins),
         }

@@ -129,6 +129,34 @@
           "description": "Also erase explicit manual corrections, including per-item corrections."
         }
       }
+    },
+    "pin_item_product": {
+      "name": "Pin item product",
+      "description": "Tell the price lookup which product an item means, then re-price it.",
+      "fields": {
+        "item_uid": {
+          "name": "Source item UID",
+          "description": "The stable UID of the authoritative source item."
+        },
+        "query": {
+          "name": "Search text",
+          "description": "Product words to search for instead of the item name, such as a brand and product type."
+        },
+        "product_id": {
+          "name": "Product ID",
+          "description": "Optional exact retailer product ID. When set, only that product is accepted."
+        }
+      }
+    },
+    "unpin_item_product": {
+      "name": "Unpin item product",
+      "description": "Forget a pinned product and go back to automatic matching.",
+      "fields": {
+        "item_uid": {
+          "name": "Source item UID",
+          "description": "The stable UID of the authoritative source item."
+        }
+      }
     }
   },
   "selector": {

@@ -325,7 +325,7 @@ def make_price_coordinator(monkeypatch, summaries, quotes_by_term):
     calls: list[str] = []
 
     class Client:
-        async def async_lookup(self, summary):
+        async def async_lookup(self, summary, pin=None):
             calls.append(summary)
             return quotes_by_term.get(summary)
 
@@ -395,7 +395,9 @@ def test_cheapest_seen_tracks_a_lower_price(monkeypatch) -> None:
     assert coordinator.cheapest_seen_for("Butter") == 9.0
 
     coordinator._snapshot.quotes.clear()
-    coordinator._client.async_lookup = lambda _s: _return(quote("Butter 500g", 7.5))
+    coordinator._client.async_lookup = lambda _s, _p=None: _return(
+        quote("Butter 500g", 7.5)
+    )
     asyncio.run(coordinator._async_update_data())
 
     assert coordinator.cheapest_seen_for("Butter") == 7.5
@@ -419,6 +421,7 @@ def test_price_diagnostics_expose_counts_only(monkeypatch) -> None:
         "priced_items",
         "unmatched_items",
         "scheduled_retries",
+        "pinned_items",
     }
     assert "Anchor" not in repr(payload)
     assert "Butter" not in repr(payload)
@@ -511,7 +514,7 @@ def test_all_transport_failures_raise_update_failed(monkeypatch) -> None:
     from homeassistant.helpers.update_coordinator import UpdateFailed
 
     class FailingClient:
-        async def async_lookup(self, _summary):
+        async def async_lookup(self, _summary, _pin=None):
             raise PriceError("down")
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -527,7 +530,7 @@ def test_all_transport_failures_raise_update_failed(monkeypatch) -> None:
 
 def test_partial_transport_failure_does_not_raise(monkeypatch) -> None:
     class MixedClient:
-        async def async_lookup(self, summary):
+        async def async_lookup(self, summary, pin=None):
             if summary == "Milk":
                 raise PriceError("down")
             return quote("Bread 600g", 3.5)
@@ -566,7 +569,9 @@ def test_previous_price_records_the_old_value(monkeypatch) -> None:
     asyncio.run(coordinator._async_update_data())
     assert coordinator.cheapest_seen_for("Butter") == 9.0
 
-    coordinator._client.async_lookup = lambda _s: _return(quote("Butter 500g", 7.5))
+    coordinator._client.async_lookup = lambda _s, _p=None: _return(
+        quote("Butter 500g", 7.5)
+    )
     asyncio.run(coordinator.async_refresh())
 
     assert coordinator.snapshot.previous["butter"] == 9.0
@@ -600,7 +605,7 @@ def test_shutdown_cancels_an_in_flight_refresh(monkeypatch) -> None:
     cancelled = False
 
     class SlowClient:
-        async def async_lookup(self, _summary):
+        async def async_lookup(self, _summary, _pin=None):
             nonlocal cancelled
             started.set()
             try:
@@ -648,7 +653,7 @@ def test_forced_refresh_reprices_existing_items(monkeypatch) -> None:
     prices = {"Butter": 9.0}
 
     class MovingClient:
-        async def async_lookup(self, _summary):
+        async def async_lookup(self, _summary, _pin=None):
             return quote("Butter 500g", prices["Butter"])
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -678,3 +683,359 @@ def test_source_push_does_not_repice_known_items(monkeypatch) -> None:
     asyncio.run(coordinator._async_update_data())
 
     assert calls == ["Butter"]
+
+
+# --- pins -------------------------------------------------------------------
+
+
+def test_pin_query_reaches_a_product_the_item_name_cannot(monkeypatch) -> None:
+    """A household shorthand has to be pinnable: 'Kids vitamins' is Multivitamin Gummies."""
+
+    searched: list[str] = []
+
+    class Client:
+        async def async_lookup(self, summary, pin=None):
+            searched.append(pin.match_target if pin else summary)
+            return quote(
+                "Example Brand Kids Multivitamin Gummies 110 Pack",
+                19.99,
+            )
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Kids vitamins"]
+    )
+    coordinator._client = Client()
+
+    asyncio.run(
+        coordinator.async_pin("Kids vitamins", query="Kids Multivitamin Gummies")
+    )
+
+    assert searched == ["Kids Multivitamin Gummies"]
+    assert coordinator.snapshot.total == 19.99
+    assert coordinator.pin_for("Kids vitamins") is not None
+
+
+def test_pin_is_persisted_and_reloaded(monkeypatch) -> None:
+    from smart_shopping_route.prices import ProductPin
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Kids vitamins"]
+    )
+    coordinator._client = None
+    asyncio.run(
+        coordinator.async_pin(
+            "Kids vitamins",
+            query="Kids Multivitamin Gummies",
+            product_id="1234567",
+            product_name="Example Brand Kids Multivitamin Gummies 110 Pack",
+        )
+    )
+
+    store = price_coordinator.PriceStore.instances[-1]
+    assert store.saved
+    pins = store.saved[-1]["pins"]
+    assert pins["kids vitamins"]["product_id"] == "1234567"
+
+    restored = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Kids vitamins"]
+    )
+    restored._price_store.initial = store.saved[-1]
+    asyncio.run(restored.async_load())
+
+    pin = restored.pin_for("Kids vitamins")
+    assert pin == ProductPin(
+        chain="",
+        query="Kids Multivitamin Gummies",
+        product_id="1234567",
+        product_name="Example Brand Kids Multivitamin Gummies 110 Pack",
+    )
+
+
+def test_exact_pin_never_falls_back_to_a_near_miss() -> None:
+    """A pin is a decision: if the exact product is gone, show nothing."""
+
+    from smart_shopping_route.prices import ProductPin, WoolworthsPriceClient
+
+    client = WoolworthsPriceClient(SimpleNamespace())
+
+    async def candidates(_term):
+        return [quote("Example Brand Kids Multivitamin Gummies 30 Pack", 9.99)]
+
+    client.async_candidates = candidates  # type: ignore[method-assign]
+    pin = ProductPin(
+        chain="woolworths", query="Multivitamin Gummies", product_id="1234567"
+    )
+
+    assert asyncio.run(client.async_lookup("Kids vitamins", pin)) is None
+
+
+def test_exact_pin_selects_the_pinned_product() -> None:
+    from smart_shopping_route.prices import ProductPin, WoolworthsPriceClient
+
+    client = WoolworthsPriceClient(SimpleNamespace())
+
+    async def candidates(_term):
+        small = PriceQuote(
+            chain="woolworths",
+            product_id="7654321",
+            product_name="Example Brand Kids Multivitamin Gummies 30 Pack",
+            price=9.99,
+        )
+        big = PriceQuote(
+            chain="woolworths",
+            product_id="1234567",
+            product_name="Example Brand Kids Multivitamin Gummies 110 Pack",
+            price=19.99,
+        )
+        return [small, big]
+
+    client.async_candidates = candidates  # type: ignore[method-assign]
+    pin = ProductPin(
+        chain="woolworths", query="Multivitamin Gummies", product_id="1234567"
+    )
+
+    result = asyncio.run(client.async_lookup("Kids vitamins", pin))
+
+    assert result is not None
+    assert result.price == 19.99
+
+
+def test_unpin_forgets_the_decision(monkeypatch) -> None:
+    coordinator, _calls = make_price_coordinator(monkeypatch, ["Milk"], {})
+    coordinator._client = None
+    asyncio.run(coordinator.async_pin("Milk", query="Milk 2L"))
+
+    asyncio.run(coordinator.async_unpin("Milk"))
+
+    assert coordinator.pin_for("Milk") is None
+
+
+# --- price drops from history ----------------------------------------------
+
+
+def test_drop_is_reported_when_a_price_falls(monkeypatch) -> None:
+    """Pak'nSave publishes no was-price, so our own history is the signal."""
+
+    prices = {"Butter": 9.0}
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Pams Butter 500g", prices["Butter"])
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._client = Client()
+
+    asyncio.run(coordinator._async_update_data())
+    prices["Butter"] = 7.5
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+
+    snapshot = coordinator.snapshot
+    assert snapshot.drop_for("butter") == 1.5
+    assert [(key, drop) for key, _q, drop in snapshot.drops] == [("butter", 1.5)]
+
+
+def test_no_drop_reported_when_price_is_unchanged_or_rises(monkeypatch) -> None:
+    prices = {"Butter": 9.0}
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Pams Butter 500g", prices["Butter"])
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._client = Client()
+
+    asyncio.run(coordinator._async_update_data())
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.snapshot.drop_for("butter") is None
+
+    prices["Butter"] = 12.0
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.snapshot.drop_for("butter") is None
+
+
+def test_a_real_special_is_not_double_counted_as_a_drop(monkeypatch) -> None:
+    prices = {"Butter": 9.7}
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Anchor Butter 500g", 8.5, was=prices["Butter"])
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._client = Client()
+
+    asyncio.run(coordinator._async_update_data())
+    prices["Butter"] = 9.7
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+
+    snapshot = coordinator.snapshot
+    assert len(snapshot.specials) == 1
+    assert snapshot.drop_for("butter") is None
+
+
+def test_unexpected_error_is_logged_once_per_cycle(caplog) -> None:
+    """A changed response shape must not warn once per item per refresh."""
+
+    import logging
+
+    class Broken:
+        async def async_lookup(self, _summary, _pin=None):
+            raise RuntimeError("shape changed")
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["A", "B", "C"]
+    )
+    coordinator._client = Broken()
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(coordinator._async_update_data())
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "3 item(s)" in warnings[0].getMessage()
+
+
+def test_unexpected_error_backs_off(monkeypatch) -> None:
+    """Otherwise a persistently broken response is retried on every push."""
+
+    calls: list[str] = []
+
+    class Broken:
+        async def async_lookup(self, summary, _pin=None):
+            calls.append(summary)
+            raise RuntimeError("shape changed")
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Milk"]
+    )
+    coordinator._client = Broken()
+
+    for _ in range(3):
+        asyncio.run(coordinator._async_update_data())
+
+    assert calls == ["Milk"]
+
+
+def test_price_history_is_bounded(monkeypatch) -> None:
+    """History is persisted, so it must not grow without limit."""
+
+    from smart_shopping_route.const import PRICE_HISTORY_MAX
+
+    summaries = ["Milk"]
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Milk 2L", 4.0)
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: list(summaries)
+    )
+    coordinator._client = Client()
+    coordinator._snapshot.cheapest_seen = {
+        f"old item {i}": 1.0 for i in range(PRICE_HISTORY_MAX + 50)
+    }
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert len(coordinator.snapshot.cheapest_seen) <= PRICE_HISTORY_MAX
+
+
+def test_pin_from_another_chain_is_discarded_on_load() -> None:
+    """A pin is per retailer: reusing it after a reconfigure prices the wrong product."""
+
+    entry = fake_entry()
+    entry.data = {"price_chain": "paknsave"}
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), entry, summaries=lambda: ["Kids vitamins"]
+    )
+    coordinator._price_store.initial = {
+        "pins": {
+            "kids vitamins": {
+                "chain": "woolworths",
+                "query": "Kids Multivitamin Gummies",
+                "product_id": "1234567",
+                "product_name": "Example Brand Kids Multivitamin Gummies 110 Pack",
+            }
+        }
+    }
+
+    asyncio.run(coordinator.async_load())
+
+    assert coordinator.pin_for("Kids vitamins") is None
+
+
+def test_pin_for_the_same_chain_survives_load() -> None:
+    entry = fake_entry()
+    entry.data = {"price_chain": "woolworths"}
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), entry, summaries=lambda: ["Kids vitamins"]
+    )
+    coordinator._price_store.initial = {
+        "pins": {
+            "kids vitamins": {
+                "chain": "woolworths",
+                "query": "Kids Multivitamin Gummies",
+                "product_id": "1234567",
+            }
+        }
+    }
+
+    asyncio.run(coordinator.async_load())
+
+    pin = coordinator.pin_for("Kids vitamins")
+    assert pin is not None
+    assert pin.product_id == "1234567"
+
+
+def test_drop_is_reported_only_in_the_refresh_that_observed_it(monkeypatch) -> None:
+    """A price that stays low must not report a drop on every later refresh."""
+
+    prices = {"Butter": 9.0}
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Pams Butter 500g", prices["Butter"])
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._client = Client()
+    asyncio.run(coordinator._async_update_data())
+
+    prices["Butter"] = 7.5
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.snapshot.drop_for("butter") == 1.5
+
+    # Next refresh: unchanged price, so no drop event.
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.snapshot.drop_for("butter") is None
+    assert coordinator.snapshot.drops == []
+
+
+def test_history_is_persisted_after_a_refresh() -> None:
+    """HA shutdown does not unload entries, so history must be written eagerly."""
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Milk 2L", 4.0)
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Milk"]
+    )
+    coordinator._client = Client()
+
+    asyncio.run(coordinator.async_refresh())
+
+    saved = coordinator._price_store.saved
+    assert saved and saved[-1]["history"]["milk"]["cheapest"] == 4.0

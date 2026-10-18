@@ -2,6 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from homeassistant.exceptions import ServiceValidationError
@@ -18,6 +19,18 @@ from smart_shopping_route.const import (
 ROUTE_ENTITY = "todo.example_supermarket"
 OTHER_ROUTE_ENTITY = "todo.second_shop"
 FOREIGN_ENTITY = "todo.some_other_integration"
+
+
+class _FakePriceStore:
+    """Removal must also delete the price store; nothing else is exercised here."""
+
+    removed: ClassVar[list[str]] = []
+
+    def __init__(self, _hass, entry_id) -> None:
+        self.entry_id = entry_id
+
+    async def async_remove(self) -> None:
+        _FakePriceStore.removed.append(self.entry_id)
 
 
 def registry_entry(platform: str, config_entry_id: str = "synthetic-entry"):
@@ -215,6 +228,7 @@ def test_removed_entry_tears_down_a_surviving_coordinator(hass, monkeypatch) -> 
     monkeypatch.setattr(
         integration, "async_pop_store", lambda _hass, entry_id: Store(_hass, entry_id)
     )
+    monkeypatch.setattr(integration, "PriceStore", _FakePriceStore)
     hass.data[DOMAIN] = {"synthetic-entry": Coordinator()}
     entry = SimpleNamespace(entry_id="synthetic-entry")
 
@@ -239,6 +253,7 @@ def test_removed_entry_deletes_the_cache_without_a_coordinator(
     monkeypatch.setattr(
         integration, "async_pop_store", lambda _hass, entry_id: Store(_hass, entry_id)
     )
+    monkeypatch.setattr(integration, "PriceStore", _FakePriceStore)
 
     asyncio.run(
         integration.async_remove_entry(hass, SimpleNamespace(entry_id="gone-entry"))
@@ -386,6 +401,7 @@ def test_removal_reuses_the_profiles_own_store_instance(hass, monkeypatch) -> No
             events.append(f"remove:{self.entry_id}:{id(self)}")
 
     monkeypatch.setattr(storage_module, "CacheStore", Store)
+    monkeypatch.setattr(integration, "PriceStore", _FakePriceStore)
 
     class Coordinator:
         def __init__(self) -> None:
@@ -409,3 +425,139 @@ def test_removal_reuses_the_profiles_own_store_instance(hass, monkeypatch) -> No
     assert coordinator.shutdown == 1
     assert events == [f"remove:synthetic-entry:{id(coordinator_store)}"]
     assert hass.data[STORES_DATA_KEY] == {}
+
+
+def test_pin_service_requires_pricing(hass, monkeypatch) -> None:
+    hass.state.expanded["referenced"] = {ROUTE_ENTITY}
+    coordinator = SimpleNamespace(
+        prices=SimpleNamespace(enabled=False), item_by_uid=lambda _uid: None
+    )
+    hass.data[DOMAIN] = {"synthetic-entry": coordinator}
+    integration._async_register_services(hass)
+    handler = hass.state.services[DOMAIN, "pin_item_product"]
+
+    with pytest.raises(ServiceValidationError, match="Pricing is not enabled"):
+        asyncio.run(handler(call(item_uid="uid-1")))
+
+
+def test_pin_service_pins_the_item(hass) -> None:
+    pinned: list[dict] = []
+
+    class Prices:
+        enabled = True
+
+        async def async_pin(self, summary, *, query="", product_id=None):
+            pinned.append({
+                "summary": summary,
+                "query": query,
+                "product_id": product_id,
+            })
+
+    coordinator = SimpleNamespace(
+        prices=Prices(),
+        item_by_uid=lambda _uid: SimpleNamespace(summary="Kids vitamins"),
+        async_notify_prices=lambda: None,
+    )
+    hass.state.expanded["referenced"] = {ROUTE_ENTITY}
+    hass.data[DOMAIN] = {"synthetic-entry": coordinator}
+    integration._async_register_services(hass)
+    handler = hass.state.services[DOMAIN, "pin_item_product"]
+
+    asyncio.run(
+        handler(
+            call(
+                item_uid="uid-1",
+                query="Kids Multivitamin Gummies",
+                product_id="1234567",
+            )
+        )
+    )
+
+    assert pinned == [
+        {
+            "summary": "Kids vitamins",
+            "query": "Kids Multivitamin Gummies",
+            "product_id": "1234567",
+        }
+    ]
+
+
+def test_unpin_service_forgets_the_item(hass) -> None:
+    unpinned: list[str] = []
+
+    class Prices:
+        enabled = True
+
+        async def async_unpin(self, summary):
+            unpinned.append(summary)
+
+    coordinator = SimpleNamespace(
+        prices=Prices(),
+        item_by_uid=lambda _uid: SimpleNamespace(summary="Kids vitamins"),
+        async_notify_prices=lambda: None,
+    )
+    hass.state.expanded["referenced"] = {ROUTE_ENTITY}
+    hass.data[DOMAIN] = {"synthetic-entry": coordinator}
+    integration._async_register_services(hass)
+    handler = hass.state.services[DOMAIN, "unpin_item_product"]
+
+    asyncio.run(handler(call(item_uid="uid-1")))
+
+    assert unpinned == ["Kids vitamins"]
+
+
+def test_removal_also_deletes_the_price_store(hass, monkeypatch) -> None:
+    """Pins and price history are user data and must not outlive the profile."""
+
+    _FakePriceStore.removed.clear()
+    monkeypatch.setattr(integration, "PriceStore", _FakePriceStore)
+    monkeypatch.setattr(
+        integration, "async_pop_store", lambda _hass, entry_id: _NullStore()
+    )
+
+    asyncio.run(
+        integration.async_remove_entry(hass, SimpleNamespace(entry_id="gone-entry"))
+    )
+
+    assert _FakePriceStore.removed == ["gone-entry"]
+
+
+class _NullStore:
+    async def async_remove(self) -> None:
+        return None
+
+
+def test_pin_service_reports_an_unknown_uid(hass) -> None:
+    def item_by_uid(_uid):
+        raise ValueError("Unknown source item UID")
+
+    coordinator = SimpleNamespace(
+        prices=SimpleNamespace(enabled=True),
+        item_by_uid=item_by_uid,
+        async_notify_prices=lambda: None,
+    )
+    hass.state.expanded["referenced"] = {ROUTE_ENTITY}
+    hass.data[DOMAIN] = {"synthetic-entry": coordinator}
+    integration._async_register_services(hass)
+
+    with pytest.raises(ServiceValidationError, match="Unknown source item UID"):
+        asyncio.run(
+            hass.state.services[DOMAIN, "pin_item_product"](call(item_uid="nope"))
+        )
+
+
+def test_unpin_service_reports_an_unknown_uid(hass) -> None:
+    def item_by_uid(_uid):
+        raise ValueError("Unknown source item UID")
+
+    coordinator = SimpleNamespace(
+        prices=SimpleNamespace(enabled=True), item_by_uid=item_by_uid
+    )
+    hass.state.expanded["referenced"] = {ROUTE_ENTITY}
+    hass.data[DOMAIN] = {"synthetic-entry": coordinator}
+    integration._async_register_services(hass)
+
+    with pytest.raises(ServiceValidationError, match="Unknown source item UID"):
+        asyncio.run(
+            hass.state.services[DOMAIN, "unpin_item_product"](call(item_uid="nope"))
+        )

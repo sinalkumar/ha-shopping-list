@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- `pin_item_product` and `unpin_item_product` actions. A pin can replace the
+  search text, so household shorthand reaches a real product name, and can pin
+  an exact retailer product ID so variants of the same product are never
+  confused. An exact pin that the retailer no longer stocks shows no price
+  rather than substituting a near-miss. Pins persist across restarts.
+- Price-drop detection for chains that publish no was-price. Pak'nSave exposes
+  no was-price at all, so the Specials sensor now also reports items that are
+  cheaper than our own previous reading, listed separately under
+  `price_drops` with the previous price and the drop.
+- Price history and pins are persisted in
+  `.storage/smart_shopping_route.prices.<entry_id>` and removed with the profile.
+
 ## 0.3.0
 
 ### Added

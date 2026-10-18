@@ -33,3 +33,40 @@ if "smart_shopping_route" not in sys.modules:
     package = importlib.util.module_from_spec(spec)
     sys.modules["smart_shopping_route"] = package
     spec.loader.exec_module(package)
+
+
+from typing import ClassVar  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fake_price_store(monkeypatch):
+    """Keep PriceStore off the real Home Assistant storage manager.
+
+    ``Store`` construction requires a bootstrapped ``hass.data``; these are unit
+    tests, so an in-memory store is substituted for every test.
+    """
+
+    import smart_shopping_route.price_coordinator as price_coordinator
+    import smart_shopping_route.storage as storage_module
+
+    class FakePriceStore:
+        instances: ClassVar[list[FakePriceStore]] = []
+
+        def __init__(self, _hass, _entry_id) -> None:
+            self.saved: list[dict] = []
+            self.initial: dict = {}
+            FakePriceStore.instances.append(self)
+
+        async def async_load(self) -> dict:
+            return self.initial
+
+        async def async_save(self, data) -> None:
+            self.saved.append(data)
+
+        async def async_remove(self) -> None:
+            return None
+
+    monkeypatch.setattr(storage_module, "PriceStore", FakePriceStore)
+    monkeypatch.setattr(price_coordinator, "PriceStore", FakePriceStore)

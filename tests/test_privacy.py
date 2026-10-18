@@ -42,6 +42,7 @@ PRICE_KEYS = {
     "priced_items",
     "unmatched_items",
     "scheduled_retries",
+    "pinned_items",
 }
 
 
@@ -82,6 +83,7 @@ class FakePriceCoordinator:
             "priced_items": 0,
             "unmatched_items": 0,
             "scheduled_retries": 0,
+            "pinned_items": 0,
         }
 
     @property

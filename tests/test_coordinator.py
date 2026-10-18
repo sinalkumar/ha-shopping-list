@@ -71,6 +71,9 @@ class FakePriceCoordinator:
     def __init__(self, _hass, _entry, *, summaries) -> None:
         self._summaries = summaries
 
+    async def async_load(self) -> None:
+        return None
+
     def async_setup(self) -> None:
         return None
 

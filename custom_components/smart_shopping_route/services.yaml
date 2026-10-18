@@ -36,6 +36,32 @@ reclassify_all:
     entity:
       integration: smart_shopping_route
       domain: todo
+pin_item_product:
+  target:
+    entity:
+      integration: smart_shopping_route
+      domain: todo
+  fields:
+    item_uid:
+      required: true
+      selector:
+        text:
+    query:
+      selector:
+        text:
+    product_id:
+      selector:
+        text:
+unpin_item_product:
+  target:
+    entity:
+      integration: smart_shopping_route
+      domain: todo
+  fields:
+    item_uid:
+      required: true
+      selector:
+        text:
 clear_cache:
   target:
     entity:

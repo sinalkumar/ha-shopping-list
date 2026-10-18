@@ -71,6 +71,47 @@ class PriceError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class ProductPin:
+    """A user's decision about which product an item means.
+
+    ``query`` replaces the item's own text as the search term, which is how a
+    household shorthand ("Kids vitamins") reaches a real product name.
+    ``product_id`` pins one exact product, so an ambiguous family such as the
+    30-pack and 110-pack of the same gummies can never be confused.
+    """
+
+    chain: str
+    query: str = ""
+    product_id: str | None = None
+    product_name: str | None = None
+
+    @property
+    def match_target(self) -> str:
+        """Text to score candidates against: the pin wins over the item text."""
+
+        return self.query.strip() or ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "chain": self.chain,
+            "query": self.query,
+            "product_id": self.product_id,
+            "product_name": self.product_name,
+        }
+
+    @classmethod
+    def from_dict(cls, chain: str, data: dict[str, Any]) -> ProductPin:
+        return cls(
+            chain=chain,
+            query=str(data.get("query") or ""),
+            product_id=(str(data["product_id"]) if data.get("product_id") else None),
+            product_name=(
+                str(data["product_name"]) if data.get("product_name") else None
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PriceQuote:
     """A matched price for one shopping item."""
 
@@ -219,21 +260,47 @@ class PriceClient:
     async def async_candidates(self, term: str) -> list[PriceQuote]:
         raise NotImplementedError
 
-    async def async_lookup(self, summary: str) -> PriceQuote | None:
+    async def async_lookup(
+        self, summary: str, pin: ProductPin | None = None
+    ) -> PriceQuote | None:
         """Return the best price for one shopping item, or None.
 
-        A qualifier in brackets is tried only after the plain term fails, so
-        the common case stays a single request.
+        A user pin takes precedence over automatic matching: its query is used
+        as the search term and its product ID, when set, must match exactly. An
+        exact pin that cannot be found returns nothing rather than falling back
+        to a guess, because a pin is a decision, not a hint.
+
+        Without a pin, a qualifier in brackets is tried only after the plain
+        term fails, so the common case stays a single request.
         """
 
-        candidates = await self.async_candidates(search_term(summary))
-        match = best_match(summary, candidates)
-        if match is not None:
+        if pin is not None and pin.product_id:
+            return self._exact(
+                await self.async_candidates(self._pin_term(pin, summary)), pin
+            )
+
+        term = self._pin_term(pin, summary)
+        target = pin.match_target if pin and pin.match_target else summary
+        match = best_match(target, await self.async_candidates(term))
+        if match is not None or (pin is not None and pin.match_target):
             return match
         qualified = search_term(summary, keep_qualifier=True)
         if qualified == search_term(summary):
             return None
         return best_match(summary, await self.async_candidates(qualified))
+
+    @staticmethod
+    def _pin_term(pin: ProductPin | None, summary: str) -> str:
+        if pin is not None and pin.match_target:
+            return pin.match_target
+        return search_term(summary)
+
+    @staticmethod
+    def _exact(candidates: list[PriceQuote], pin: ProductPin) -> PriceQuote | None:
+        for candidate in candidates:
+            if candidate.product_id == pin.product_id:
+                return candidate
+        return None
 
 
 class WoolworthsPriceClient(PriceClient):
@@ -417,13 +484,26 @@ async def async_list_paknsave_stores(
 ) -> dict[str, str]:
     """Return ``{store_id: store_name}`` for Pak'nSave.
 
-    Used by the config flow so a profile can be pointed at a real store
-    without hand-copying a UUID.
+    Used by the config flow so a profile can be pointed at a real store without
+    hand-copying a UUID. Any session created here is closed again, because a
+    config flow runs many times and a leaked session lives until restart.
     """
 
+    owns_session = session is None
     client = PakNSavePriceClient(hass, store_id="browse")
     if session is not None:
         client._session = session
+    try:
+        return await _async_fetch_stores(client)
+    finally:
+        if owns_session and client._session is not None:
+            await client._session.close()
+            client._session = None
+
+
+async def _async_fetch_stores(client: PakNSavePriceClient) -> dict[str, str]:
+    """Fetch and shape the store list for an already configured client."""
+
     token = await client._async_token()
     session = client.session
     try:

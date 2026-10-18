@@ -21,11 +21,14 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator: RouteCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[SensorEntity] = [
-        UnclassifiedSensor(entry, coordinator),
-        BasketTotalSensor(entry, coordinator),
-        SpecialsSensor(entry, coordinator),
-    ]
+    entities: list[SensorEntity] = [UnclassifiedSensor(entry, coordinator)]
+    if coordinator.prices.enabled:
+        # Only create price entities for profiles that opted in, so upgrading a
+        # route-only profile does not add permanently unavailable sensors.
+        entities += [
+            BasketTotalSensor(entry, coordinator),
+            SpecialsSensor(entry, coordinator),
+        ]
     async_add_entities(entities)
 
 
@@ -121,7 +124,12 @@ class BasketTotalSensor(RouteSensor):
 
 
 class SpecialsSensor(RouteSensor):
-    """How many items on the list are currently on special."""
+    """Items that are cheaper now than their reference price.
+
+    A retailer-published was-price is used when the chain provides one. For
+    chains that publish none, the reference is our own previous reading, so
+    "down $1.20 since last check" is the honest signal.
+    """
 
     _attr_translation_key = "specials"
     _attr_icon = "mdi:tag-outline"
@@ -139,7 +147,8 @@ class SpecialsSensor(RouteSensor):
     def native_value(self) -> int | None:
         if not self.coordinator.prices.enabled:
             return None
-        return len(self.coordinator.prices.snapshot.specials)
+        snapshot = self.coordinator.prices.snapshot
+        return len(snapshot.specials) + len(snapshot.drops)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -158,5 +167,17 @@ class SpecialsSensor(RouteSensor):
                 }
                 for key, quote in snapshot.specials
             ],
-            "total_savings": snapshot.savings,
+            "total_savings": round(
+                snapshot.savings + sum(drop for _k, _q, drop in snapshot.drops), 2
+            ),
+            "price_drops": [
+                {
+                    "summary": key,
+                    "product": quote.product_name,
+                    "price": quote.price,
+                    "previous_price": quote.price + drop,
+                    "drop": drop,
+                }
+                for key, quote, drop in snapshot.drops
+            ],
         }
