@@ -561,3 +561,38 @@ def test_unpin_service_reports_an_unknown_uid(hass) -> None:
         asyncio.run(
             hass.state.services[DOMAIN, "unpin_item_product"](call(item_uid="nope"))
         )
+
+
+def test_pin_service_leaves_notification_to_the_price_coordinator(hass) -> None:
+    """The price coordinator's update callback notifies; the service must not.
+
+    Dispatching here as well writes every price-aware entity's state twice per
+    pin, and the coordinator covers the case where its refresh is deferred.
+    """
+
+    notifications: list[bool] = []
+
+    class Prices:
+        enabled = True
+
+        async def async_pin(self, summary, *, query="", product_id=None):
+            return None
+
+        async def async_unpin(self, summary):
+            return None
+
+    coordinator = SimpleNamespace(
+        prices=Prices(),
+        item_by_uid=lambda _uid: SimpleNamespace(summary="Kids vitamins"),
+        async_notify_prices=lambda: notifications.append(True),
+    )
+    hass.state.expanded["referenced"] = {ROUTE_ENTITY}
+    hass.data[DOMAIN] = {"synthetic-entry": coordinator}
+    integration._async_register_services(hass)
+
+    asyncio.run(hass.state.services[DOMAIN, "pin_item_product"](call(item_uid="uid-1")))
+    asyncio.run(
+        hass.state.services[DOMAIN, "unpin_item_product"](call(item_uid="uid-1"))
+    )
+
+    assert notifications == []

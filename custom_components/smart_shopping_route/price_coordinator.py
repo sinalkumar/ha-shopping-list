@@ -266,6 +266,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._backoff_until.pop(key, None)
         self._attempts.pop(key, None)
         await self._async_persist()
+        self._notify_if_refresh_deferred()
         await self.async_refresh()
 
     async def async_unpin(self, summary: str) -> None:
@@ -277,7 +278,21 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._backoff_until.pop(key, None)
         self._attempts.pop(key, None)
         await self._async_persist()
+        self._notify_if_refresh_deferred()
         await self.async_refresh()
+
+    @callback
+    def _notify_if_refresh_deferred(self) -> None:
+        """Notify now only when the refresh that follows cannot run yet.
+
+        A refresh notifies through the update callback, so notifying here as
+        well would write every price-aware entity's state twice. When an update
+        is already in flight the refresh is deferred instead, and without this
+        a cleared quote would stay on screen until that request finished.
+        """
+
+        if self._update_task is not None and not self._update_task.done():
+            self._async_handle_update_done()
 
     def _trim_pins(self) -> None:
         """Bound pins, dropping the oldest-inserted ones beyond the ceiling."""

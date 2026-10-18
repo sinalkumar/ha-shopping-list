@@ -177,7 +177,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
             )
         except ValueError as err:
             raise ServiceValidationError(str(err)) from err
-        coordinator.async_notify_prices()
 
     async def unpin_product(call: ServiceCall) -> None:
         coordinator = _coordinator_for_call(hass, call)
@@ -186,7 +185,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
         except ValueError as err:
             raise ServiceValidationError(str(err)) from err
         await coordinator.prices.async_unpin(item.summary or "")
-        coordinator.async_notify_prices()
 
     async def clear(call: ServiceCall) -> None:
         await _coordinator_for_call(hass, call).async_clear_cache(

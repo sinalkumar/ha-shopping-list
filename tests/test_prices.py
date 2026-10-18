@@ -1216,3 +1216,74 @@ def test_async_setup_registers_a_listener_that_notifies(monkeypatch) -> None:
     coordinator.async_update_listeners()
 
     assert notified == [True]
+
+
+def test_pin_dispatches_exactly_once() -> None:
+    """The refresh already notifies; an extra dispatch writes state twice."""
+
+    dispatched: list[bool] = []
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Kids Multivitamin Gummies", 19.99)
+
+    entry = fake_entry()
+    entry.data = {"price_chain": "woolworths"}
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(loop=asyncio.new_event_loop(), is_stopping=False),
+        entry,
+        summaries=lambda: ["Kids vitamins"],
+    )
+    coordinator._client = Client()
+    coordinator.async_set_update_callback(lambda: dispatched.append(True))
+    coordinator._unsub_listener = coordinator.async_add_listener(
+        coordinator._async_handle_update_done
+    )
+
+    asyncio.run(
+        coordinator.async_pin("Kids vitamins", query="Kids Multivitamin Gummies")
+    )
+    assert len(dispatched) == 1
+
+    dispatched.clear()
+    asyncio.run(coordinator.async_unpin("Kids vitamins"))
+    assert len(dispatched) == 1
+
+
+def test_pin_notifies_immediately_when_a_refresh_is_in_flight() -> None:
+    """Otherwise a cleared quote stays on screen until the in-flight request ends."""
+
+    dispatched: list[bool] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowClient:
+        async def async_lookup(self, _summary, _pin=None):
+            started.set()
+            await release.wait()
+            return quote("Milk 2L", 4.0)
+
+    entry = fake_entry()
+    entry.data = {"price_chain": "woolworths"}
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(loop=asyncio.new_event_loop(), is_stopping=False),
+        entry,
+        summaries=lambda: ["Milk"],
+    )
+    coordinator._client = SlowClient()
+    coordinator.async_set_update_callback(lambda: dispatched.append(True))
+    coordinator._unsub_listener = coordinator.async_add_listener(
+        coordinator._async_handle_update_done
+    )
+
+    async def scenario() -> None:
+        inflight = asyncio.create_task(coordinator.async_refresh())
+        await started.wait()
+        pin = asyncio.create_task(coordinator.async_pin("Milk", query="Milk 2L"))
+        await asyncio.sleep(0)
+        # The pin could not refresh, so it must have notified on its own.
+        assert dispatched, "pin did not notify while a refresh was in flight"
+        release.set()
+        await asyncio.gather(inflight, pin)
+
+    asyncio.run(scenario())
