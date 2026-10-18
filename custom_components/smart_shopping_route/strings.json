@@ -63,15 +63,6 @@
     },
     "abort": {
       "reconfigure_successful": "The shopping route was updated."
-    },
-    "selector": {
-      "price_chain": {
-        "options": {
-          "none": "No prices",
-          "woolworths": "Woolworths",
-          "paknsave": "Pak'nSave"
-        }
-      }
     }
   },
   "entity": {
@@ -137,6 +128,15 @@
           "name": "Include manual overrides",
           "description": "Also erase explicit manual corrections, including per-item corrections."
         }
+      }
+    }
+  },
+  "selector": {
+    "price_chain": {
+      "options": {
+        "none": "No prices",
+        "woolworths": "Woolworths",
+        "paknsave": "Pak'nSave"
       }
     }
   }
