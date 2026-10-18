@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- Per-item price history: one point per price change, sampled every six hours
+  otherwise, capped at 60 points per item. This is what makes a drop or a
+  "cheapest seen" claim possible for a chain that publishes no was-price.
+- Pak'nSave promotions are now detected. The search payload carries the same
+  promotion records as the product detail endpoint (verified across a sample),
+  so detection costs no extra requests. Because most of those promotions are
+  price locks whose reward value equals the shelf price, they are reported as
+  `promotions` context and never counted as savings.
+- The Specials sensor reports `items` (real was-price specials), `price_drops`
+  (cheaper than a previously observed price) and `promotions` (retailer flag,
+  no reduction known) separately, each with `lowest_seen` and `at_lowest`.
+
+### Changed
+
+- The `was` figure for a chain with no was-price now comes from an observed
+  price rather than a stored scalar, so it is only shown when a higher price was
+  actually recorded.
+- Diagnostics report `items_with_history`.
+
 ## 0.4.0
 
 ### Added

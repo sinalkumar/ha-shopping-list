@@ -21,7 +21,13 @@ from .const import (
 )
 from .coordinator import RouteCoordinator
 from .device import route_device_info
-from .models import decorate_summary, section_names, sort_items, strip_display_prefix
+from .models import (
+    decorate_summary,
+    normalize_summary,
+    section_names,
+    sort_items,
+    strip_display_prefix,
+)
 
 
 async def async_setup_entry(
@@ -101,8 +107,16 @@ class SmartShoppingRouteTodo(TodoListEntity):
         if quote is None:
             return None
         text = f"${quote.price:.2f}"
+        reference = self.coordinator.prices.snapshot.reference_price(
+            normalize_summary(item.summary or "")
+        )
         if quote.is_special and quote.was_price is not None:
             text += f" · was ${quote.was_price:.2f}"
+        elif reference is not None:
+            # No retailer was-price, so use a price we actually observed.
+            text += f" · was ${reference:.2f}"
+        elif quote.on_promotion:
+            text += " · on special"
         return f"{text} · {quote.product_name}"
 
     async def async_added_to_hass(self) -> None:

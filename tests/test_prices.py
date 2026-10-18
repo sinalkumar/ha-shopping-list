@@ -423,6 +423,7 @@ def test_price_diagnostics_expose_counts_only(monkeypatch) -> None:
         "unmatched_items",
         "scheduled_retries",
         "pinned_items",
+        "items_with_history",
     }
     assert "Anchor" not in repr(payload)
     assert "Butter" not in repr(payload)
@@ -575,7 +576,7 @@ def test_previous_price_records_the_old_value(monkeypatch) -> None:
     )
     asyncio.run(coordinator.async_refresh())
 
-    assert coordinator.snapshot.previous["butter"] == 9.0
+    assert coordinator.snapshot.reference_price("butter") == 9.0
     assert coordinator.cheapest_seen_for("Butter") == 7.5
 
 
@@ -941,13 +942,14 @@ def test_price_history_is_bounded(monkeypatch) -> None:
         SimpleNamespace(), fake_entry(), summaries=lambda: list(summaries)
     )
     coordinator._client = Client()
-    coordinator._snapshot.cheapest_seen = {
-        f"old item {i}": 1.0 for i in range(PRICE_HISTORY_MAX + 50)
+    coordinator._snapshot.history = {
+        f"old item {i}": [price_coordinator.PricePoint(0.0, 1.0)]
+        for i in range(PRICE_HISTORY_MAX + 50)
     }
 
     asyncio.run(coordinator._async_update_data())
 
-    assert len(coordinator.snapshot.cheapest_seen) <= PRICE_HISTORY_MAX
+    assert len(coordinator.snapshot.history) <= PRICE_HISTORY_MAX
 
 
 def test_pin_from_another_chain_is_discarded_on_load() -> None:
@@ -1039,7 +1041,7 @@ def test_history_is_persisted_after_a_refresh() -> None:
     asyncio.run(coordinator.async_refresh())
 
     saved = coordinator._price_store.saved
-    assert saved and saved[-1]["history"]["milk"]["cheapest"] == 4.0
+    assert saved and saved[-1]["history"]["milk"]["points"][-1][1] == 4.0
 
 
 def test_a_request_during_a_refresh_runs_again_afterwards() -> None:
@@ -1287,3 +1289,180 @@ def test_pin_notifies_immediately_when_a_refresh_is_in_flight() -> None:
         await asyncio.gather(inflight, pin)
 
     asyncio.run(scenario())
+
+
+# --- price series (the only reference available for Foodstuffs) -------------
+
+
+def test_series_records_a_point_per_change(monkeypatch) -> None:
+    prices = {"Butter": 9.0}
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Pams Butter 500g", prices["Butter"])
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._client = Client()
+    asyncio.run(coordinator._async_update_data())
+
+    prices["Butter"] = 8.0
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+    prices["Butter"] = 7.0
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+
+    series = coordinator.snapshot.points_for("butter")
+    assert [point.price for point in series] == [9.0, 8.0, 7.0]
+    assert coordinator.snapshot.lowest_for("butter") == 7.0
+    assert coordinator.snapshot.highest_for("butter") == 9.0
+    assert coordinator.snapshot.is_at_lowest("butter") is True
+
+
+def test_unchanged_price_does_not_grow_the_series(monkeypatch) -> None:
+    """Only changes (or a 6-hour gap) are recorded, so the series stays compact."""
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Pams Butter 500g", 9.0)
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._client = Client()
+
+    for _ in range(5):
+        coordinator._force_full = True
+        asyncio.run(coordinator._async_update_data())
+
+    assert len(coordinator.snapshot.points_for("butter")) == 1
+
+
+def test_series_points_are_capped_per_item(monkeypatch) -> None:
+    from smart_shopping_route.const import PRICE_HISTORY_MAX_POINTS
+
+    prices = {"n": 0}
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            prices["n"] += 1
+            return quote("Pams Butter 500g", float(prices["n"]))
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._client = Client()
+    for _ in range(PRICE_HISTORY_MAX_POINTS + 10):
+        coordinator._force_full = True
+        asyncio.run(coordinator._async_update_data())
+
+    assert len(coordinator.snapshot.points_for("butter")) == PRICE_HISTORY_MAX_POINTS
+
+
+def test_series_survives_a_restart(monkeypatch) -> None:
+    """A restart must not reset the reference price, or drops stop working."""
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Pams Butter 500g", 7.0)
+
+    entry = fake_entry()
+    entry.data = {"price_chain": "paknsave"}
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), entry, summaries=lambda: ["Butter"]
+    )
+    coordinator._price_store.initial = {
+        "history": {"butter": {"points": [[1000.0, 9.0]]}}
+    }
+    asyncio.run(coordinator.async_load())
+    coordinator._client = Client()
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.snapshot.reference_price("butter") == 9.0
+    assert coordinator.snapshot.drop_for("butter") == 2.0
+
+
+def test_restored_series_tolerates_malformed_entries() -> None:
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
+    )
+    coordinator._price_store.initial = {
+        "history": {
+            "good": {"points": [[1.0, 5.0]]},
+            "bad": "not a dict",
+            "mixed": {"points": [[1.0, 5.0], ["nope"], None, [2.0, 6.0]]},
+        }
+    }
+
+    asyncio.run(coordinator.async_load())
+
+    assert [p.price for p in coordinator.snapshot.points_for("good")] == [5.0]
+    assert coordinator.snapshot.points_for("bad") == []
+    assert [p.price for p in coordinator.snapshot.points_for("mixed")] == [5.0, 6.0]
+
+
+# --- Foodstuffs promotions --------------------------------------------------
+
+
+def test_paknsave_marks_promotions_without_claiming_a_discount() -> None:
+    """Foodstuffs flags a promotion but publishes no was-price.
+
+    Most of those promotions are price locks whose reward value equals the shelf
+    price, so the flag is context, never savings.
+    """
+
+    token = FakeResponse(200, {"access_token": "anon"})
+    search = FakeResponse(
+        200,
+        {
+            "products": [
+                {
+                    "productId": "p1",
+                    "brand": "Pams",
+                    "name": "Pure Butter 500g",
+                    "singlePrice": {"price": 739},
+                    "promotions": [
+                        {"promoId": "1", "rewardValue": 739, "decal": "6000"}
+                    ],
+                },
+                {
+                    "productId": "p2",
+                    "brand": "Pams",
+                    "name": "Plain Butter 500g",
+                    "singlePrice": {"price": 829},
+                    "promotions": [],
+                },
+            ]
+        },
+    )
+    client = PakNSavePriceClient(SimpleNamespace(), "store-1")
+    client._session = FakeSession([token, search])
+
+    promoted = asyncio.run(client.async_lookup("butter"))
+
+    assert promoted is not None
+    assert promoted.on_promotion is True
+    # A promotion record must never be turned into a fabricated was-price.
+    assert promoted.was_price is None
+    assert promoted.is_special is False
+    assert promoted.savings == 0.0
+
+
+def test_woolworths_quotes_are_not_flagged_as_promotions() -> None:
+    body = woolworths_body([
+        {
+            "sku": "1",
+            "productName": "Anchor Butter 500g",
+            "variants": [{"variantPrice": {"sellingPrice": 8.5}}],
+        }
+    ])
+    client = WoolworthsPriceClient(SimpleNamespace())
+    client._session = FakeSession([FakeResponse(200, body)])
+
+    result = asyncio.run(client.async_lookup("butter"))
+
+    assert result is not None
+    assert result.on_promotion is False

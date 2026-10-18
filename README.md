@@ -132,9 +132,24 @@ data:
 
 Pins are per profile and per chain, because each retailer has its own catalogue. A pin survives the item being ticked off and added again.
 
-### Price drops
+### Price history and drops
 
-Woolworths publishes a real was-price, so specials are detected from it. Pak'nSave publishes none at all, so for that chain the reference is **our own previous reading**: an item is reported as a drop when it is cheaper than the last time we priced it. That is why the Specials sensor reports a count from both signals, and its attributes separate `items` (retailer specials) from `price_drops` (falls since the last reading).
+Woolworths publishes a real was-price, so specials are detected from it. Pak'nSave publishes **no was-price anywhere in its API**, so the integration keeps its own price series per item: one point per price change, sampled every six hours otherwise, capped at 60 points per item and 500 items.
+
+That series is what makes the following possible, and it only becomes useful after the first price change:
+
+- **Drops**: an item is reported as a drop when it is cheaper than a previously observed price. The `was` figure in that case is a price we actually saw, never an inferred one.
+- **Lowest seen**: `lowest_seen` and `at_lowest` say whether the current price is the cheapest recorded.
+
+Pak'nSave does flag promotions — its search payload carries the same promotion records as the product detail endpoint, so no extra requests are made. But most of those promotions are **price locks whose reward value equals the shelf price** (357 promotions sampled, only 5 below the shelf price), so a promotion record is reported as `promotions` context and is deliberately **never** counted as savings.
+
+The Specials sensor therefore separates three things:
+
+| Attribute | Meaning |
+|---|---|
+| `items` | Retailer-published specials with a real was-price (Woolworths) |
+| `price_drops` | Items cheaper than a previously observed price, with `previous_price`, `drop`, `lowest_seen`, `at_lowest` |
+| `promotions` | Retailer flags a promotion but no reduction is known, with `lowest_seen`, `at_lowest` |
 
 Price history and pins are stored in `.storage/smart_shopping_route.prices.<entry_id>` so a restart does not reset them, and both are deleted when the profile is removed.
 
@@ -184,7 +199,8 @@ Locally, the profile cache persists normalized item summaries and their sections
 - Corrections are keyed by source UID, which the calculated list does not display.
 - Home Assistant 2026.8 still requires an isolated internal `EntityComponent` lookup to obtain the source Todo entity for push subscriptions.
 - Prices are estimates from public product search, not a quote. Quantities in item names are not interpreted, so `2x milk` is priced as one unit.
-- Price drops compare against the previous reading only, not a long trend, so a price that fell before the feature was enabled is not reported.
+- Price history starts when the feature is enabled, so a price that fell before that is not reported as a drop.
+- Pak'nSave promotions cannot be turned into a savings figure, because the API provides no reference price for them.
 - Woolworths prices are the online price and are not tied to a physical store.
 - No manual product pin yet, and no price history beyond the current reading for Pak'nSave.
 

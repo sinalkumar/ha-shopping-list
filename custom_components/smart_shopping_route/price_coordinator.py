@@ -28,6 +28,8 @@ from .const import (
     PRICE_CONCURRENCY,
     PRICE_FAILURE_BACKOFF_SECONDS,
     PRICE_HISTORY_MAX,
+    PRICE_HISTORY_MAX_POINTS,
+    PRICE_HISTORY_MIN_INTERVAL,
     PRICE_PIN_MAX,
     PRICE_REFRESH_HOURS,
 )
@@ -39,17 +41,60 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
+class PricePoint:
+    """One observation of an item's price."""
+
+    ts: float
+    price: float
+
+
+@dataclass(slots=True)
 class PriceSnapshot:
-    """Cached quotes for the current list, plus a small price history."""
+    """Cached quotes for the current list, plus a per-item price series."""
 
     quotes: dict[str, PriceQuote] = field(default_factory=dict)
-    cheapest_seen: dict[str, float] = field(default_factory=dict)
-    previous: dict[str, float] = field(default_factory=dict)
+    # A bounded series per item. This is the only reference price available for
+    # a chain that publishes no was-price, so it is what makes a drop or a
+    # "cheapest so far" claim possible at all.
+    history: dict[str, list[PricePoint]] = field(default_factory=dict)
     # Drops are an event of the refresh that observed them, so a price that
     # stays low is not reported as falling again on every later refresh.
     drops_now: dict[str, float] = field(default_factory=dict)
     failed: set[str] = field(default_factory=set)
     active: dict[str, int] = field(default_factory=dict)
+
+    def points_for(self, key: str) -> list[PricePoint]:
+        return self.history.get(key, [])
+
+    def lowest_for(self, key: str) -> float | None:
+        points = self.points_for(key)
+        return min(point.price for point in points) if points else None
+
+    def highest_for(self, key: str) -> float | None:
+        points = self.points_for(key)
+        return max(point.price for point in points) if points else None
+
+    def reference_price(self, key: str) -> float | None:
+        """The most recent earlier price that was higher than the current one.
+
+        This is what a "was" figure means when the retailer supplies none: a
+        price we actually observed, not an inferred or invented one.
+        """
+
+        quote = self.quotes.get(key)
+        if quote is None:
+            return None
+        for point in reversed(self.points_for(key)):
+            if point.price > quote.price:
+                return point.price
+        return None
+
+    def is_at_lowest(self, key: str) -> bool:
+        lowest = self.lowest_for(key)
+        quote = self.quotes.get(key)
+        if lowest is None or quote is None:
+            return False
+        return quote.price <= lowest
 
     def _active_quotes(self) -> list[tuple[str, int, PriceQuote]]:
         """Yield one entry per listed item, honouring duplicate summaries."""
@@ -215,28 +260,26 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         history = data.get("history")
         if isinstance(history, dict):
             for key, entry in history.items():
-                if not isinstance(entry, dict):
+                points = entry.get("points") if isinstance(entry, dict) else None
+                if not isinstance(points, list):
                     continue
-                cheapest = entry.get("cheapest")
-                previous = entry.get("previous")
-                if isinstance(cheapest, (int, float)):
-                    self._snapshot.cheapest_seen[key] = float(cheapest)
-                if isinstance(previous, (int, float)):
-                    self._snapshot.previous[key] = float(previous)
+                series = [
+                    PricePoint(float(ts), float(price))
+                    for ts, price in (
+                        point
+                        for point in points
+                        if isinstance(point, (list, tuple)) and len(point) == 2
+                    )
+                ]
+                if series:
+                    self._snapshot.history[key] = series[-PRICE_HISTORY_MAX_POINTS:]
 
     async def _async_persist(self) -> None:
         await self._price_store.async_save({
             "pins": {key: pin.as_dict() for key, pin in self._pins.items()},
             "history": {
-                key: {
-                    "cheapest": cheapest,
-                    **(
-                        {"previous": self._snapshot.previous[key]}
-                        if key in self._snapshot.previous
-                        else {}
-                    ),
-                }
-                for key, cheapest in self._snapshot.cheapest_seen.items()
+                key: {"points": [[point.ts, point.price] for point in series]}
+                for key, series in self._snapshot.history.items()
             },
         })
 
@@ -322,7 +365,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         self._update_task = None
-        if self._pins or self._snapshot.cheapest_seen:
+        if self._pins or self._snapshot.history:
             await self._async_persist()
 
     async def async_refresh(self, *, force: bool = True) -> None:  # type: ignore[override]
@@ -365,7 +408,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         # History is the only specials signal for a chain with no was-price, and
         # Home Assistant shutdown does not unload entries, so it must be written
         # when it changes rather than only on unload.
-        if self._snapshot.cheapest_seen or self._pins:
+        if self._snapshot.history or self._pins:
             await self._async_persist()
 
     async def _handle_refresh_interval(self, _now: Any = None) -> None:
@@ -461,17 +504,17 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._trim_history(active)
 
     def _trim_history(self, active: set[str]) -> None:
-        """Bound persisted price history, dropping off-list entries first."""
+        """Bound the persisted series count, dropping off-list items first."""
 
-        for store in (self._snapshot.cheapest_seen, self._snapshot.previous):
-            excess = len(store) - PRICE_HISTORY_MAX
-            if excess <= 0:
-                continue
-            for key in [key for key in store if key not in active][:excess]:
-                store.pop(key, None)
-            excess = len(store) - PRICE_HISTORY_MAX
-            for key in list(store)[: max(0, excess)]:
-                store.pop(key, None)
+        history = self._snapshot.history
+        excess = len(history) - PRICE_HISTORY_MAX
+        if excess <= 0:
+            return
+        for key in [key for key in history if key not in active][:excess]:
+            history.pop(key, None)
+        excess = len(history) - PRICE_HISTORY_MAX
+        for key in list(history)[: max(0, excess)]:
+            history.pop(key, None)
 
     async def _async_price_one(self, key: str, summary: str) -> None:
         assert self._client is not None
@@ -501,18 +544,31 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._snapshot.quotes[key] = quote
 
     def _record_history(self, key: str, quote: PriceQuote) -> None:
-        """Record history from the previously known quote, before replacing it."""
+        """Append an observation, then derive the drop from the series.
 
-        previous = self._snapshot.quotes.get(key)
-        if previous is not None and previous.price != quote.price:
-            self._snapshot.previous[key] = previous.price
-            if previous.price > quote.price and not quote.is_special:
-                self._snapshot.drops_now[key] = round(previous.price - quote.price, 2)
-            else:
-                self._snapshot.drops_now.pop(key, None)
-        cheapest = self._snapshot.cheapest_seen.get(key)
-        if cheapest is None or quote.price < cheapest:
-            self._snapshot.cheapest_seen[key] = quote.price
+        The series is recorded before the quote is replaced, so the reference
+        price is an earlier observation rather than the value being stored.
+        """
+
+        series = self._snapshot.history.setdefault(key, [])
+        now = time.time()
+        last = series[-1] if series else None
+
+        # Derive the drop from the observation before this one. The new price is
+        # appended afterwards, so the comparison cannot be against itself.
+        if last is not None and last.price > quote.price and not quote.is_special:
+            self._snapshot.drops_now[key] = round(last.price - quote.price, 2)
+        else:
+            self._snapshot.drops_now.pop(key, None)
+
+        if (
+            last is None
+            or last.price != quote.price
+            or now - last.ts >= PRICE_HISTORY_MIN_INTERVAL
+        ):
+            series.append(PricePoint(now, quote.price))
+            if len(series) > PRICE_HISTORY_MAX_POINTS:
+                del series[: len(series) - PRICE_HISTORY_MAX_POINTS]
 
     def _schedule_retry(self, key: str) -> None:
         attempts = self._attempts.get(key, 0) + 1
@@ -525,7 +581,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         return self._snapshot.quotes.get(normalize_summary(summary))
 
     def cheapest_seen_for(self, summary: str) -> float | None:
-        return self._snapshot.cheapest_seen.get(normalize_summary(summary))
+        return self._snapshot.lowest_for(normalize_summary(summary))
 
     @property
     def snapshot(self) -> PriceSnapshot:
@@ -541,4 +597,5 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "unmatched_items": self._snapshot.unmatched_count,
             "scheduled_retries": len(self._backoff_until),
             "pinned_items": len(self._pins),
+            "items_with_history": len(self._snapshot.history),
         }

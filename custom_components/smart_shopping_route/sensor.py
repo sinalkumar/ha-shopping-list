@@ -151,6 +151,29 @@ class SpecialsSensor(RouteSensor):
         return len(snapshot.specials) + len(snapshot.drops)
 
     @property
+    def _promotions(self) -> list[dict[str, Any]]:
+        """Items the retailer flags as promoted without giving a was-price.
+
+        Foodstuffs publishes a promotion record but no reference price, and most
+        of those promotions do not lower the shelf price, so this is reported as
+        context rather than counted as savings.
+        """
+
+        snapshot = self.coordinator.prices.snapshot
+        return [
+            {
+                "summary": key,
+                "product": quote.product_name,
+                "price": quote.price,
+                "valid_until": quote.valid_until,
+                "lowest_seen": snapshot.lowest_for(key),
+                "at_lowest": snapshot.is_at_lowest(key),
+            }
+            for key, quote in snapshot.quotes.items()
+            if quote.on_promotion and not quote.is_special
+        ]
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         if not self.coordinator.prices.enabled:
             return {}
@@ -177,7 +200,10 @@ class SpecialsSensor(RouteSensor):
                     "price": quote.price,
                     "previous_price": quote.price + drop,
                     "drop": drop,
+                    "lowest_seen": snapshot.lowest_for(key),
+                    "at_lowest": snapshot.is_at_lowest(key),
                 }
                 for key, quote, drop in snapshot.drops
             ],
+            "promotions": self._promotions,
         }

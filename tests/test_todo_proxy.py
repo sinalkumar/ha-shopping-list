@@ -48,6 +48,10 @@ class FakePrices:
     def quote_for(self, summary):
         return self._quotes.get(summary)
 
+    @property
+    def snapshot(self):
+        return SimpleNamespace(reference_price=lambda _key: None)
+
 
 class Coordinator:
     available = True

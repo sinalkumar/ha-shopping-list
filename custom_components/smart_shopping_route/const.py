@@ -34,6 +34,10 @@ PRICE_CONCURRENCY = 3
 PRICE_FAILURE_BACKOFF_SECONDS = 3600
 # Price history is persisted, so it must be bounded like the classification cache.
 PRICE_HISTORY_MAX = 500
+# Observations kept per item. Changes are always recorded; unchanged readings are
+# sampled so a long-running profile keeps a usable series without growing.
+PRICE_HISTORY_MAX_POINTS = 60
+PRICE_HISTORY_MIN_INTERVAL = 6 * 3600
 # Pins outlive their item by design, so they need their own ceiling.
 PRICE_PIN_MAX = 200
 

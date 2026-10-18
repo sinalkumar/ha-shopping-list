@@ -122,6 +122,10 @@ class PriceQuote:
     was_price: float | None = None
     valid_until: str | None = None
     score: float = 0.0
+    # Retailer says a promotion record is active. This does not imply a lower
+    # price: most Foodstuffs promotions are price locks whose reward value
+    # equals the shelf price, so it is reported as context, not as savings.
+    on_promotion: bool = False
 
     @property
     def is_special(self) -> bool:
@@ -142,6 +146,7 @@ class PriceQuote:
             "was_price": self.was_price,
             "valid_until": self.valid_until,
             "is_special": self.is_special,
+            "on_promotion": self.on_promotion,
         }
 
 
@@ -228,6 +233,7 @@ def best_match(summary: str, candidates: list[PriceQuote]) -> PriceQuote | None:
             was_price=candidate.was_price,
             valid_until=candidate.valid_until,
             score=score,
+            on_promotion=candidate.on_promotion,
         )
     return best
 
@@ -466,6 +472,9 @@ class PakNSavePriceClient(PriceClient):
                 if isinstance(promotions, dict)
                 else None
             )
+            # The search payload carries the same promotion records as the
+            # product detail endpoint, so no extra request is needed.
+            on_promotion = bool(promotions)
             quotes.append(
                 PriceQuote(
                     chain=self.chain,
@@ -474,6 +483,7 @@ class PakNSavePriceClient(PriceClient):
                     price=round(float(single) / 100, 2),
                     was_price=None,
                     valid_until=str(validity) if validity else None,
+                    on_promotion=on_promotion,
                 )
             )
         return quotes

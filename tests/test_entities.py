@@ -297,3 +297,43 @@ def test_price_sensors_are_created_when_pricing_is_on() -> None:
         "BasketTotalSensor",
         "SpecialsSensor",
     ]
+
+
+def test_specials_sensor_separates_promotions_from_savings() -> None:
+    """A retailer promotion without a was-price is context, not savings."""
+
+    promoted = PriceQuote(
+        chain="paknsave",
+        product_id="p1",
+        product_name="Pams Pure Olive Oil",
+        price=8.99,
+        on_promotion=True,
+    )
+    coordinator = Coordinator()
+    coordinator.prices = SimpleNamespace(
+        enabled=True,
+        chain="paknsave",
+        snapshot=SimpleNamespace(
+            total=8.99,
+            savings=0.0,
+            failed=set(),
+            unmatched_count=0,
+            priced_count=1,
+            specials=[],
+            drops=[],
+            quotes={"olive oil": promoted},
+            lowest_for=lambda _key: 8.99,
+            is_at_lowest=lambda _key: True,
+        ),
+        quote_for=lambda _summary: None,
+    )
+
+    sensor = SpecialsSensor(entry(), coordinator)
+
+    # Not counted as a special, because no price reduction is known.
+    assert sensor.native_value == 0
+    promotions = sensor.extra_state_attributes["promotions"]
+    assert len(promotions) == 1
+    assert promotions[0]["product"] == "Pams Pure Olive Oil"
+    assert promotions[0]["at_lowest"] is True
+    assert sensor.extra_state_attributes["total_savings"] == 0
