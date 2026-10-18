@@ -51,6 +51,10 @@ class RouteCoordinator:
         self.classifier = AITaskClassifier(hass, entry.data[CONF_AI_TASK_ENTITY_ID])
         self.store = async_get_store(hass, entry.entry_id)
         self.prices = PriceCoordinator(hass, entry, summaries=self._priced_summaries)
+        # Every completed price update must reach entities, including the ones
+        # the 12-hour interval performs: the interval bypasses this
+        # coordinator's own notification path.
+        self.prices.async_set_update_callback(self.async_notify_prices)
         self.cache = ClassificationCache()
         self.items: list[TodoItem] = []
         self.pending: set[str] = set()
@@ -201,6 +205,7 @@ class RouteCoordinator:
         self.items = items
         if items and self.cache.prune_uids({item.uid for item in items if item.uid}):
             self._schedule_save()
+        self._prune_retries(items)
         self._notify()
         self.async_classify_unknown()
         self._request_prices()
@@ -228,6 +233,17 @@ class RouteCoordinator:
     async def _async_price_then_notify(self) -> None:
         await self.prices.async_refresh(force=False)
         self._notify_prices()
+
+    @callback
+    def _prune_retries(self, items: list[TodoItem]) -> None:
+        """Forget backoff for items that are no longer on the list."""
+
+        if not self._attempts and not self._retry_after:
+            return
+        present = {normalize_summary(item.summary or "") for item in items}
+        for store in (self._attempts, self._retry_after):
+            for key in [key for key in store if key not in present]:
+                store.pop(key, None)
 
     @callback
     def _notify(self) -> None:

@@ -13,6 +13,7 @@ from smart_shopping_route.prices import (
     PakNSavePriceClient,
     PriceError,
     PriceQuote,
+    ProductPin,
     WoolworthsPriceClient,
     best_match,
     create_client,
@@ -1039,3 +1040,179 @@ def test_history_is_persisted_after_a_refresh() -> None:
 
     saved = coordinator._price_store.saved
     assert saved and saved[-1]["history"]["milk"]["cheapest"] == 4.0
+
+
+def test_a_request_during_a_refresh_runs_again_afterwards() -> None:
+    """A pin change or a new item must not wait for the next interval."""
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    class SlowClient:
+        async def async_lookup(self, summary, _pin=None):
+            calls.append(summary)
+            if len(calls) == 1:
+                started.set()
+                await release.wait()
+            return quote("Milk 2L", 4.0)
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Milk"]
+    )
+    coordinator._client = SlowClient()
+
+    async def scenario() -> None:
+        first = asyncio.create_task(coordinator.async_refresh())
+        await started.wait()
+        # A second request arrives while the first is in flight.
+        second = asyncio.create_task(coordinator.async_refresh(force=False))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(scenario())
+
+    assert coordinator._rerun_requested is False
+
+
+def test_the_real_interval_path_reprices_and_notifies() -> None:
+    """The scheduled 12-hour path must re-price AND re-render entities.
+
+    It calls the framework's private refresh, bypassing both our public
+    async_refresh and RouteCoordinator's notification helper, so this covers the
+    exact path a timer takes.
+    """
+
+    notified: list[bool] = []
+
+    class Client:
+        def __init__(self) -> None:
+            self.price = 9.0
+
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Butter 500g", self.price)
+
+    entry = fake_entry()
+    entry.data = {"price_chain": "woolworths"}
+    loop = asyncio.new_event_loop()
+    coordinator = price_coordinator.PriceCoordinator(
+        # is_stopping is a plain bool here, as the real property is; a truthy
+        # callable would make the framework skip a scheduled refresh.
+        SimpleNamespace(loop=loop, is_stopping=False),
+        entry,
+        summaries=lambda: ["Butter"],
+    )
+    coordinator._client = Client()
+    coordinator.async_set_update_callback(lambda: notified.append(True))
+    coordinator._unsub_listener = coordinator.async_add_listener(
+        coordinator._async_handle_update_done
+    )
+    asyncio.run(coordinator._async_refresh_guarded())
+    assert coordinator.snapshot.total == 9.0
+
+    coordinator._client.price = 7.0
+    asyncio.run(coordinator._handle_refresh_interval())
+
+    assert coordinator.snapshot.total == 7.0
+    assert coordinator.snapshot.drop_for("butter") == 2.0
+    assert len(notified) == 2
+
+
+def test_interval_refresh_notifies_entities() -> None:
+    """The 12-hour interval must re-render entities, not just update the snapshot.
+
+    It bypasses the route coordinator's own notification path, so without the
+    listener forwarding, price sensors and item descriptions stay stale.
+    """
+
+    notified: list[bool] = []
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Milk 2L", 4.0)
+
+    entry = fake_entry()
+    entry.data = {"price_chain": "woolworths"}
+    loop = asyncio.new_event_loop()
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(loop=loop, is_stopping=lambda: False),
+        entry,
+        summaries=lambda: ["Milk"],
+    )
+    coordinator._client = Client()
+    coordinator.async_set_update_callback(lambda: notified.append(True))
+    # Register the listener the way async_setup does, without a real retailer.
+    coordinator._unsub_listener = coordinator.async_add_listener(
+        coordinator._async_handle_update_done
+    )
+
+    asyncio.run(coordinator._async_refresh_guarded())
+
+    assert notified == [True]
+
+
+def test_update_callback_is_not_called_after_shutdown() -> None:
+    notified: list[bool] = []
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Milk"]
+    )
+    coordinator.async_set_update_callback(lambda: notified.append(True))
+    asyncio.run(coordinator.async_shutdown())
+
+    coordinator._async_handle_update_done()
+
+    assert notified == []
+
+
+def test_pins_are_bounded() -> None:
+    """Pins persist forever by design, so they still need a cap."""
+
+    from smart_shopping_route.const import PRICE_PIN_MAX
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), fake_entry(), summaries=lambda: ["Milk"]
+    )
+    coordinator._client = None
+    for i in range(PRICE_PIN_MAX + 20):
+        coordinator._pins[f"item {i}"] = ProductPin(
+            chain="", query=f"query {i}", product_id=str(i)
+        )
+
+    asyncio.run(coordinator.async_pin("Milk", query="Milk 2L"))
+
+    assert len(coordinator._pins) <= PRICE_PIN_MAX
+    # The newest pin must survive the trim.
+    assert coordinator.pin_for("Milk") is not None
+
+
+def test_async_setup_registers_a_listener_that_notifies(monkeypatch) -> None:
+    """Go through async_setup itself, so what it registers is what is tested.
+
+    Registering the listener by hand in the test would hide the original bug,
+    where async_setup registered a no-op and interval refreshes never reached
+    entities.
+    """
+
+    notified: list[bool] = []
+
+    class Client:
+        async def async_lookup(self, _summary, _pin=None):
+            return quote("Butter 500g", 5.0)
+
+    monkeypatch.setattr(price_coordinator, "create_client", lambda *_a, **_k: Client())
+    entry = fake_entry()
+    entry.data = {"price_chain": "woolworths"}
+    loop = asyncio.new_event_loop()
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(loop=loop, is_stopping=False),
+        entry,
+        summaries=lambda: ["Butter"],
+    )
+    coordinator.async_set_update_callback(lambda: notified.append(True))
+
+    coordinator.async_setup()
+    assert coordinator._unsub_listener is not None
+    coordinator.async_update_listeners()
+
+    assert notified == [True]

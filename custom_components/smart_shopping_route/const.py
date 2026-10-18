@@ -34,6 +34,8 @@ PRICE_CONCURRENCY = 3
 PRICE_FAILURE_BACKOFF_SECONDS = 3600
 # Price history is persisted, so it must be bounded like the classification cache.
 PRICE_HISTORY_MAX = 500
+# Pins outlive their item by design, so they need their own ceiling.
+PRICE_PIN_MAX = 200
 
 AI_TIMEOUT_SECONDS = 45
 AI_CONCURRENCY = 3

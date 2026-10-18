@@ -64,6 +64,13 @@ class FakePriceCoordinator:
     def __init__(self, _hass, _entry, *, summaries) -> None:
         pass
 
+    def async_set_update_callback(self, on_update) -> None:
+        self._on_update = on_update
+
+    def _async_handle_update_done(self) -> None:
+        if getattr(self, "_on_update", None):
+            self._on_update()
+
     def async_setup(self) -> None:
         return None
 

@@ -12,12 +12,13 @@ import asyncio
 import logging
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -27,6 +28,7 @@ from .const import (
     PRICE_CONCURRENCY,
     PRICE_FAILURE_BACKOFF_SECONDS,
     PRICE_HISTORY_MAX,
+    PRICE_PIN_MAX,
     PRICE_REFRESH_HOURS,
 )
 from .models import normalize_summary
@@ -48,7 +50,6 @@ class PriceSnapshot:
     drops_now: dict[str, float] = field(default_factory=dict)
     failed: set[str] = field(default_factory=set)
     active: dict[str, int] = field(default_factory=dict)
-    pinned: set[str] = field(default_factory=set)
 
     def _active_quotes(self) -> list[tuple[str, int, PriceQuote]]:
         """Yield one entry per listed item, honouring duplicate summaries."""
@@ -128,8 +129,10 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._semaphore = asyncio.Semaphore(PRICE_CONCURRENCY)
         self._update_task: asyncio.Task[Any] | None = None
         self._force_full = False
+        self._rerun_requested = False
         self._closed = False
         self._pins: dict[str, ProductPin] = {}
+        self._on_update: Callable[[], None] | None = None
         self._price_store = PriceStore(hass, entry.entry_id)
         self._unsub_listener: CALLBACK_TYPE | None = None
         super().__init__(
@@ -141,6 +144,11 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             # the ContextVar fallback the framework reports as incorrect usage.
             config_entry=entry,
         )
+
+    def async_set_update_callback(self, on_update: Callable[[], None]) -> None:
+        """Register the callback entities use to re-render after an update."""
+
+        self._on_update = on_update
 
     @property
     def enabled(self) -> bool:
@@ -170,9 +178,21 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         if self._client is None:
             return
         # DataUpdateCoordinator only schedules its interval once it has a
-        # listener, so without this the 12-hour refresh would never run.
+        # listener, so without this the 12-hour refresh would never run. The
+        # listener also forwards every completed update to entities: the
+        # interval updates the snapshot without going through
+        # RouteCoordinator._async_price_then_notify, so without this the price
+        # sensors and item descriptions would keep showing stale prices.
         if self._unsub_listener is None:
-            self._unsub_listener = self.async_add_listener(lambda: None)
+            self._unsub_listener = self.async_add_listener(
+                self._async_handle_update_done
+            )
+
+    @callback
+    def _async_handle_update_done(self) -> None:
+        if self._closed or self._on_update is None:
+            return
+        self._on_update()
 
     async def async_load(self) -> None:
         """Restore pins and price history before the first reading."""
@@ -233,6 +253,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         key = normalize_summary(summary)
         if not key:
             raise ValueError("Item has no summary to pin")
+        self._trim_pins()
         self._pins[key] = ProductPin(
             chain=self._chain_key,
             query=query.strip(),
@@ -257,6 +278,15 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._attempts.pop(key, None)
         await self._async_persist()
         await self.async_refresh()
+
+    def _trim_pins(self) -> None:
+        """Bound pins, dropping the oldest-inserted ones beyond the ceiling."""
+
+        excess = len(self._pins) + 1 - PRICE_PIN_MAX
+        if excess <= 0:
+            return
+        for key in list(self._pins)[:excess]:
+            self._pins.pop(key, None)
 
     def pin_for(self, summary: str) -> ProductPin | None:
         return self._pins.get(normalize_summary(summary))
@@ -293,8 +323,12 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         if force:
             self._force_full = True
         if self._update_task is not None and not self._update_task.done():
-            # One refresh at a time: the retailer is not a queue.
+            # One refresh at a time: the retailer is not a queue. Remember that
+            # another was wanted so a pin change or a newly added item is not
+            # silently left until the next interval.
+            self._rerun_requested = True
             return
+        self._rerun_requested = False
         self._update_task = asyncio.create_task(self._async_refresh_guarded())
         try:
             await self._update_task
@@ -303,6 +337,9 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         finally:
             if self._update_task is not None and self._update_task.done():
                 self._update_task = None
+        if self._rerun_requested and not self._closed:
+            self._rerun_requested = False
+            await self.async_refresh(force=False)
 
     async def _async_refresh_guarded(self) -> None:
         try:
@@ -404,9 +441,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             if key not in active:
                 self._backoff_until.pop(key, None)
                 self._attempts.pop(key, None)
-        # Pins outlive their item on purpose: a household shorthand recurs, and
-        # a user decision should not evaporate when the item is ticked off.
-        self._snapshot.pinned &= active | set(self._pins)
+        # Pins deliberately outlive their item: a household shorthand recurs,
+        # and a user decision should not evaporate when an item is ticked off.
         self._trim_history(active)
 
     def _trim_history(self, active: set[str]) -> None:
@@ -448,8 +484,6 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._snapshot.failed.discard(key)
         self._record_history(key, quote)
         self._snapshot.quotes[key] = quote
-        if key in self._pins:
-            self._snapshot.pinned.add(key)
 
     def _record_history(self, key: str, quote: PriceQuote) -> None:
         """Record history from the previously known quote, before replacing it."""

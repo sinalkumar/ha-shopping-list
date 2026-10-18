@@ -74,6 +74,13 @@ class FakePriceCoordinator:
     async def async_load(self) -> None:
         return None
 
+    def async_set_update_callback(self, on_update) -> None:
+        self._on_update = on_update
+
+    def _async_handle_update_done(self) -> None:
+        if getattr(self, "_on_update", None):
+            self._on_update()
+
     def async_setup(self) -> None:
         return None
 
@@ -510,3 +517,86 @@ def test_closed_coordinator_refuses_mutations(monkeypatch) -> None:
     ):
         with pytest.raises(HomeAssistantError):
             asyncio.run(mutation)
+
+
+def test_ai_retry_bookkeeping_is_pruned_when_items_leave(monkeypatch) -> None:
+    """Otherwise repeated failed-then-removed items grow these dicts forever."""
+
+    coordinator = make_coordinator(
+        [item("uid-1", "Milk"), item("uid-2", "Bread")], monkeypatch, answer=None
+    )
+    asyncio.run(run_classification(coordinator))
+    assert coordinator._attempts
+
+    asyncio.run(push_source_update(coordinator, [item("uid-1", "Milk")]))
+
+    assert set(coordinator._attempts) == {"milk"}
+    assert set(coordinator._retry_after) == {"milk"}
+
+
+def test_route_wires_the_price_update_callback(monkeypatch) -> None:
+    """Production wiring, not a hand-wired test double.
+
+    The price coordinator's interval refresh bypasses this coordinator's own
+    notification helper, so the callback is what makes price sensors and item
+    descriptions re-render. A test that sets the callback itself cannot catch
+    this being missing from __init__, which is how the bug reached review.
+    """
+
+    # Real PriceCoordinator, so this covers the wiring in __init__ itself.
+    monkeypatch.setattr(storage_module, "CacheStore", FakeStore)
+    monkeypatch.setattr(coordinator_module, "async_dispatcher_send", lambda *a: None)
+
+    entry = SimpleNamespace(
+        entry_id="synthetic-entry",
+        title="Example Supermarket",
+        data={
+            "profile_name": "Example Supermarket",
+            "sections": SECTIONS,
+            "source_entity_id": "todo.synthetic_source",
+            "ai_task_entity_id": "ai_task.synthetic",
+        },
+        async_on_unload=lambda _cb: None,
+        pref_disable_polling=False,
+    )
+    hass = SimpleNamespace(
+        data={},
+        states=SimpleNamespace(get=lambda _e: None),
+        verify_event_loop_thread=lambda *a, **k: None,
+    )
+
+    coordinator = coordinator_module.RouteCoordinator(hass, entry)
+
+    assert coordinator.prices._on_update is not None
+
+
+def test_price_notification_reaches_entities(monkeypatch) -> None:
+    """The wired callback must dispatch the signal entities subscribe to."""
+
+    sent: list[str] = []
+    monkeypatch.setattr(storage_module, "CacheStore", FakeStore)
+    monkeypatch.setattr(
+        coordinator_module, "async_dispatcher_send", lambda _hass, sig: sent.append(sig)
+    )
+    entry = SimpleNamespace(
+        entry_id="synthetic-entry",
+        title="Example Supermarket",
+        data={
+            "profile_name": "Example Supermarket",
+            "sections": SECTIONS,
+            "source_entity_id": "todo.synthetic_source",
+            "ai_task_entity_id": "ai_task.synthetic",
+        },
+        async_on_unload=lambda _cb: None,
+        pref_disable_polling=False,
+    )
+    hass = SimpleNamespace(
+        data={},
+        states=SimpleNamespace(get=lambda _e: None),
+        verify_event_loop_thread=lambda *a, **k: None,
+    )
+    coordinator = coordinator_module.RouteCoordinator(hass, entry)
+
+    coordinator.prices._async_handle_update_done()
+
+    assert sent == [coordinator.price_signal]
