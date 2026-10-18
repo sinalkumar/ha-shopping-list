@@ -709,11 +709,13 @@ def test_prune_history_spares_products_still_on_a_list(data_dir) -> None:
     assert not (mirror / "history_3.parquet").exists()
 
 
-def test_transient_backfill_failure_is_retried() -> None:
+def test_transient_backfill_failure_is_retried(monkeypatch) -> None:
     """A network failure must not permanently skip an item until restart."""
 
     import smart_shopping_route.price_coordinator as price_coordinator
     from smart_shopping_route.prices import PriceQuote
+
+    monkeypatch.setattr(GrocerData, "duckdb_available", staticmethod(lambda: True))
 
     coordinator = price_coordinator.PriceCoordinator(
         SimpleNamespace(), _entry({"grocer_store_id": 228}), summaries=lambda: ["Milk"]
@@ -741,9 +743,11 @@ def test_transient_backfill_failure_is_retried() -> None:
     assert "milk" in coordinator._backfilled
 
 
-def test_definitive_no_match_is_not_retried() -> None:
+def test_definitive_no_match_is_not_retried(monkeypatch) -> None:
     import smart_shopping_route.price_coordinator as price_coordinator
     from smart_shopping_route.prices import PriceQuote
+
+    monkeypatch.setattr(GrocerData, "duckdb_available", staticmethod(lambda: True))
 
     coordinator = price_coordinator.PriceCoordinator(
         SimpleNamespace(), _entry({"grocer_store_id": 228}), summaries=lambda: ["Milk"]
@@ -765,10 +769,12 @@ def test_definitive_no_match_is_not_retried() -> None:
     assert len(calls) == 1
 
 
-def test_grocer_sync_timestamps_are_persisted() -> None:
+def test_grocer_sync_timestamps_are_persisted(monkeypatch) -> None:
     """Otherwise a profile with no matches re-downloads the catalogue each boot."""
 
     import smart_shopping_route.price_coordinator as price_coordinator
+
+    monkeypatch.setattr(GrocerData, "duckdb_available", staticmethod(lambda: True))
 
     async def run_in_thread(func, *args):
         return func(*args)
@@ -799,3 +805,23 @@ async def _ok(*_args, **_kwargs) -> bool:
 
 async def _zero() -> int:
     return 0
+
+
+def test_manifest_keys_are_sorted_for_hassfest() -> None:
+    """hassfest fails the build if domain/name are not first and the rest sorted."""
+
+    import json
+    from pathlib import Path
+
+    manifest = json.loads(
+        (
+            Path(__file__).parents[1]
+            / "custom_components"
+            / "smart_shopping_route"
+            / "manifest.json"
+        ).read_text()
+    )
+    keys = list(manifest)
+
+    assert keys[:2] == ["domain", "name"]
+    assert keys[2:] == sorted(keys[2:])
