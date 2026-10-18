@@ -35,7 +35,13 @@ def _entry(extra: dict):
 
 
 @pytest.fixture
-def data_dir(tmp_path) -> GrocerData:
+def data_dir(tmp_path, monkeypatch) -> GrocerData:
+    # HTTP streaming fixtures use marker bytes; reference-format validation has
+    # separate tests with real Parquet and the real validator.
+    monkeypatch.setattr(
+        GrocerData, "_validate_mirror", staticmethod(lambda *_args: None)
+    )
+
     async def run_in_thread(func, *args):
         return func(*args)
 
@@ -183,7 +189,9 @@ class _BrokenChunks:
 
 
 def test_concurrent_downloads_do_not_collide(tmp_path) -> None:
-    """Locks are per instance but the mirror directory is shared."""
+    """Locks are per instance but validated replacements are atomic."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
 
     async def run_in_thread(func, *args):
         return func(*args)
@@ -194,7 +202,18 @@ def test_concurrent_downloads_do_not_collide(tmp_path) -> None:
             async_add_executor_job=run_in_thread,
         )
         data = GrocerData(hass)
-        data._session = SlowSession(b"payload-" + str(id(data)).encode())
+        buffer = pa.BufferOutputStream()
+        pq.write_table(
+            pa.table({
+                "product_id": [id(data)],
+                "original_price_cent": [400],
+                "sale_price_cent": [None],
+                "updated_at": ["2026-01-01"],
+            }),
+            buffer,
+            compression="gzip",
+        )
+        data._session = SlowSession(buffer.getvalue().to_pybytes())
         return data
 
     first, second = make(), make()
@@ -281,9 +300,9 @@ def build_match_data(data_dir, *, regular: float, sale: float | None) -> None:
 
 
 NAMES = {
-    6403: "sanitarium weet bix breakfast cereal",
+    6403: "sanitarium weet bix 1.2kg",
     111: "sanitarium weet bix",
-    42243: "pure butter",
+    42243: "anchor butter 500g",
 }
 
 
@@ -408,7 +427,7 @@ def test_backfill_imports_validated_history(monkeypatch) -> None:
     assert coordinator.snapshot.lowest_for("weetbix") == 4.49
 
 
-def test_backfill_runs_once_per_item() -> None:
+def test_missing_mirror_or_match_is_not_permanent() -> None:
     coordinator = price_coordinator.PriceCoordinator(
         SimpleNamespace(),
         _entry({"grocer_store_id": 228}),
@@ -430,7 +449,8 @@ def test_backfill_runs_once_per_item() -> None:
     for _ in range(3):
         asyncio.run(coordinator._async_backfill("weetbix", quote))
 
-    assert len(calls) == 1
+    assert len(calls) == 3
+    assert "weetbix" not in coordinator._backfilled
 
 
 def test_backfill_keeps_our_own_fresher_observations() -> None:
@@ -491,7 +511,7 @@ def test_transient_backfill_failure_is_retried() -> None:
 
     asyncio.run(coordinator._async_backfill("milk", quote))
     assert len(attempts) == 2
-    assert "milk" in coordinator._backfilled
+    assert "milk" not in coordinator._backfilled
 
 
 def test_grocer_sync_timestamps_are_persisted() -> None:
@@ -668,13 +688,13 @@ def test_match_uses_sitemap_names(data_dir, monkeypatch) -> None:
     data_dir._store_prices = {228: {6403: GrocerPrice(6403, 7.99, None)}}
     target = data_dir._dir / "names.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("6403\tsanitarium weet bix breakfast cereal\n", encoding="utf-8")
+    target.write_text("6403\tsanitarium weet bix 1.2kg\n", encoding="utf-8")
 
     hit = asyncio.run(data_dir.async_match(228, "Sanitarium Weet-Bix 1.2kg", 7.99))
 
     assert hit is not None
     assert hit.product.product_id == 6403
-    assert hit.product.name == "sanitarium weet bix breakfast cereal"
+    assert hit.product.name == "sanitarium weet bix 1.2kg"
 
 
 def test_match_is_skipped_when_names_are_unavailable(data_dir, monkeypatch) -> None:

@@ -12,6 +12,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: npm ci --ignore-scripts
+      - run: npm run test:frontend
       - uses: astral-sh/setup-uv@v7
       - run: uv pip install --system -r requirements_test.txt
       - run: pytest --cov=smart_shopping_route --cov-report=term-missing --cov-fail-under=85

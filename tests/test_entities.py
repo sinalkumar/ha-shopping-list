@@ -186,7 +186,15 @@ class PricedCoordinator(Coordinator):
         self.prices = SimpleNamespace(
             enabled=True,
             chain="woolworths",
+            status_attributes=lambda: {
+                "price_status": "partial",
+                "priced_items": 2,
+                "unmatched_items": 1,
+            },
             snapshot=SimpleNamespace(
+                status="partial",
+                stale_for=lambda _key: False,
+                active={"butter": 1, "milk": 1},
                 total=12.5,
                 savings=1.2,
                 failed={"Kids vitamins"},
@@ -313,7 +321,11 @@ def test_specials_sensor_separates_promotions_from_savings() -> None:
     coordinator.prices = SimpleNamespace(
         enabled=True,
         chain="paknsave",
+        status_attributes=lambda: {"price_status": "current"},
         snapshot=SimpleNamespace(
+            status="current",
+            stale_for=lambda _key: False,
+            active={"olive oil": 1},
             total=8.99,
             savings=0.0,
             failed=set(),

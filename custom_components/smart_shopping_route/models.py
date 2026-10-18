@@ -139,7 +139,7 @@ def decorate_summary(summary: str, section: str, enabled: bool) -> str:
 def strip_display_prefix(summary: str, known_sections: Iterable[str]) -> str:
     """Remove exactly one integration-created prefix from an edited summary."""
 
-    for section in known_sections:
+    for section in sorted(known_sections, key=len, reverse=True):
         prefix = f"{section} · "
         if summary.startswith(prefix):
             return summary.removeprefix(prefix).strip()

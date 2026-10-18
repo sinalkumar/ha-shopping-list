@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import copy
+from datetime import UTC, datetime
+from hashlib import sha256
 
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components.todo import TodoItem, TodoListEntity
 from homeassistant.components.todo.const import TodoItemStatus, TodoListEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
@@ -63,13 +67,16 @@ class SmartShoppingRouteTodo(TodoListEntity):
             | TodoListEntityFeature.UPDATE_TODO_ITEM
             | TodoListEntityFeature.SET_DUE_DATE_ON_ITEM
             | TodoListEntityFeature.SET_DUE_DATETIME_ON_ITEM
+            | TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
         )
         features = int(self.coordinator.source.supported_features) & int(allowed)
         # The description is derived from prices, so this view always accepts the
         # field even when the source cannot store it. It must: the to-do dialog
         # sends every field back on save, and Home Assistant rejects the whole
         # call when a field is not advertised, which blocked renaming an item.
-        return features | int(TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM)
+        if self.coordinator.prices.enabled:
+            features |= int(TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM)
+        return features
 
     @property
     def _prefix_enabled(self) -> bool:
@@ -100,17 +107,27 @@ class SmartShoppingRouteTodo(TodoListEntity):
                 )
             price = self._price_description(source_item)
             if price:
-                item.description = price
+                generated = f"Price info (automatic; edit notes below): {price}"
+                checksum = sha256(generated.encode()).hexdigest()
+                item.description = (
+                    f"<!-- ssr-price:start -->\n{generated}\n"
+                    f"<!-- ssr-price:sha256={checksum} -->\n"
+                    f"<!-- ssr-price:end -->"
+                    + (
+                        f"\n\n{source_item.description}"
+                        if source_item.description is not None
+                        else ""
+                    )
+                )
             decorated.append(item)
         return decorated
 
     def _price_description(self, item: TodoItem) -> str | None:
         """Return a price line: price, was-price, size, unit price, product.
 
-        A "was" figure is only shown when it is a real reference: the retailer's
-        own was-price, or a price we previously observed. Nothing is invented
-        for a promotion that carries no reference, because a promotion record
-        alone does not mean the price came down.
+        "Was" is reserved for a fresh retailer reference. Recent historical
+        observations are dated and labelled separately; stale quotes never
+        claim a current discount.
         """
 
         quote = self.coordinator.prices.quote_for(item.summary or "")
@@ -118,15 +135,17 @@ class SmartShoppingRouteTodo(TodoListEntity):
             return None
         parts = [f"${quote.price:.2f}"]
 
-        reference: float | None = None
-        if quote.is_special and quote.was_price is not None:
-            reference = quote.was_price
+        snapshot = self.coordinator.prices.snapshot
+        key = normalize_summary(item.summary or "")
+        if snapshot.stale_for(key):
+            parts.append("STALE — refresh prices")
+        elif quote.is_special and quote.was_price is not None:
+            parts.append(f"was ${quote.was_price:.2f}")
         else:
-            reference = self.coordinator.prices.snapshot.reference_price(
-                normalize_summary(item.summary or "")
-            )
-        if reference is not None and reference > quote.price:
-            parts.append(f"was ${reference:.2f}")
+            reference = snapshot.reference_point(key)
+            if reference is not None and reference.price > quote.price:
+                date = datetime.fromtimestamp(reference.ts, UTC).date().isoformat()
+                parts.append(f"previously seen ${reference.price:.2f} ({date})")
 
         if quote.size:
             parts.append(quote.size)
@@ -169,20 +188,86 @@ class SmartShoppingRouteTodo(TodoListEntity):
     def _forward_summary(self, item: TodoItem) -> TodoItem:
         forwarded = copy.copy(item)
         if forwarded.summary and self._prefix_enabled:
-            forwarded.summary = strip_display_prefix(
-                forwarded.summary, section_names(self.coordinator.sections)
+            source = next(
+                (raw for raw in self.coordinator.items if raw.uid == item.uid), None
             )
+            known = (
+                (self.coordinator.section_for(source),)
+                if source is not None
+                else section_names(self.coordinator.sections)
+            )
+            forwarded.summary = strip_display_prefix(forwarded.summary, known)
         return forwarded
 
+    def _forward_notes(self, item: TodoItem, *, update: bool) -> TodoItem:
+        """Remove only our leading price block; notes remain source-owned.
+
+        HA sends the complete displayed item on rename/status updates. In
+        particular, None means *clear notes* for local_todo, not *omit field*.
+        """
+
+        forwarded = self._forward_summary(item)
+        description = forwarded.description
+        source = (
+            next((raw for raw in self.coordinator.items if raw.uid == item.uid), None)
+            if update
+            else None
+        )
+        # A genuine source note is never interpreted as generated metadata.
+        if description != (source.description if source else None):
+            if description and description.startswith("<!-- ssr-price:start -->\n"):
+                block, sep, notes = description.partition("\n<!-- ssr-price:end -->")
+                if not sep:
+                    raise ServiceValidationError(
+                        "Automatic price information was changed. Reopen the item "
+                        "and edit only the notes below it."
+                    )
+                generated, hash_sep, checksum = block.removeprefix(
+                    "<!-- ssr-price:start -->\n"
+                ).rpartition("\n<!-- ssr-price:sha256=")
+                if (
+                    not hash_sep
+                    or checksum != f"{sha256(generated.encode()).hexdigest()} -->"
+                ):
+                    raise ServiceValidationError(
+                        "Automatic price information is read-only. Reopen the item and edit notes below it, or use product pinning."
+                    )
+                description = notes[2:] if notes.startswith("\n\n") else None
+        if not self.coordinator.source.supported_features & int(
+            TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+        ):
+            if description:
+                raise ServiceValidationError(
+                    "The source list does not support notes. Use product pinning "
+                    "to correct prices; automatic price information is read-only."
+                )
+            description = None
+        forwarded.description = description
+        return forwarded
+
+    async def _async_check_source_control(self) -> None:
+        user_id = getattr(getattr(self, "_context", None), "user_id", None)
+        if user_id:
+            user = await self.hass.auth.async_get_user(user_id)
+            if user is None or not user.permissions.check_entity(
+                self.coordinator.source.entity_id, POLICY_CONTROL
+            ):
+                raise ServiceValidationError(
+                    "Not authorized to control the source list"
+                )
+
     async def async_create_todo_item(self, item: TodoItem) -> None:
-        await self.coordinator.source.async_create(self._forward_summary(item))
+        await self._async_check_source_control()
+        await self.coordinator.source.async_create(
+            self._forward_notes(item, update=False)
+        )
 
     async def async_update_todo_item(self, item: TodoItem) -> None:
-        forwarded = self._forward_summary(item)
-        # The description shown here is generated from live prices, so a value
-        # coming back from the UI is stale display text, not a user edit.
-        forwarded.description = None
-        await self.coordinator.source.async_update(forwarded)
+        await self._async_check_source_control()
+        await self.coordinator.source.async_update(
+            self._forward_notes(item, update=True)
+        )
 
     async def async_delete_todo_items(self, uids: list[str]) -> None:
+        await self._async_check_source_control()
         await self.coordinator.source.async_delete(uids)

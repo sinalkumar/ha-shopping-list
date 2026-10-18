@@ -418,15 +418,39 @@ def read_columns(path: str, wanted: list[str]) -> dict[str, list[Any]]:
     except OSError as err:
         raise ParquetError("parquet file could not be read") from err
 
-    metadata = _footer_metadata(data)
-
-    result: dict[str, list[Any]] = {}
-    for chunk in _column_chunks(metadata):
-        if chunk.name not in wanted:
-            continue
-        _dictionary, values = _read_pages(data, chunk)
-        result[chunk.name] = values
-    missing = [name for name in wanted if name not in result]
-    if missing:
-        raise ParquetError(f"columns not found: {', '.join(missing)}")
-    return result
+    try:
+        metadata = _footer_metadata(data)
+        result: dict[str, list[Any]] = {}
+        groups = metadata.get(4) or []
+        for group in groups:
+            seen: set[str] = set()
+            for chunk in _column_chunks({2: metadata.get(2), 4: [group]}):
+                if chunk.name not in wanted:
+                    continue
+                if chunk.name in seen:
+                    raise ParquetError("duplicate column in row group")
+                seen.add(chunk.name)
+                _dictionary, values = _read_pages(data, chunk)
+                if len(values) != chunk.num_values or len(values) != group.get(3):
+                    raise ParquetError("row group column length mismatch")
+                result.setdefault(chunk.name, []).extend(values)
+            if seen != set(wanted):
+                raise ParquetError("columns not found in every row group")
+        if not groups and metadata.get(3) == 0:
+            available = {
+                (element.get(4) or b"").decode("utf-8")
+                for element in (metadata.get(2) or [])[1:]
+            }
+            result = {name: [] for name in wanted if name in available}
+        missing = [name for name in wanted if name not in result]
+        if missing:
+            raise ParquetError(f"columns not found: {', '.join(missing)}")
+        if any(len(values) != metadata.get(3) for values in result.values()):
+            raise ParquetError("file row count does not match column lengths")
+        return result
+    except ParquetError:
+        raise
+    except Exception as err:
+        # Corrupt network assets must not escape as IndexError, struct.error,
+        # decompressor errors, or KeyError during integration setup/refresh.
+        raise ParquetError("invalid or unsupported parquet data") from err

@@ -14,9 +14,9 @@ Two things this deliberately does not do:
 * It is not the primary source of *current* prices. The retailers' own endpoints
   are fresher and rank search results by relevance, which matters because a
   flat catalogue scan is much worse at guessing what "Strawberries" means.
-* It does not trust a name match on its own. A candidate is accepted only when
-  its price agrees with what the retailer just quoted, which makes the match
-  self-validating.
+* Automatic matching is conservative: names, explicit pack sizes and prices
+  must agree, and ambiguous sibling products are refused. Catalogue slugs often
+  omit pack sizes, so an explicit history pin is needed for those products.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -33,8 +34,9 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import GROCER_MIRROR_DIR
+from .const import GROCER_MIRROR_DIR, GROCER_STORE_REFRESH_HOURS
 from .parquet import ParquetError, read_columns
+from .prices import size_from_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,33 +50,20 @@ PRODUCT_HISTORY_URL = f"{ASSET_BASE}/price_history_v3/price_history_{{product}}.
 # compiled reader nor an API key.
 SITEMAP_URLS = tuple(f"{ASSET_BASE}/sitemap_{index}.txt" for index in range(3))
 NAMES_FILE = "names.txt"
+_STORE_COLUMNS = ("product_id", "original_price_cent", "sale_price_cent", "updated_at")
+_HISTORY_COLUMNS = ("updated_at", "store_id", "price_cent")
 # A price match must be within this many cents to count as the same product.
 PRICE_TOLERANCE = 0.02
 # Minimum name similarity before a candidate is even considered.
-MIN_NAME_RATIO = 0.55
+MIN_NAME_RATIO = 0.85
+
+
 # Pack sizes must agree, because two sizes of the same product often share a
 # price and price agreement alone would then accept the wrong one.
-_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(kg|g|ml|l|pk|pack|sheets|s)\b", re.I)
-
-
 def _sizes(text: str) -> set[str]:
-    """Extract comparable pack sizes, normalised to a base unit."""
-
-    found: set[str] = set()
-    for amount, unit in _SIZE_RE.findall(str(text)):
-        unit = unit.lower()
-        try:
-            value = float(amount)
-        except ValueError:
-            continue
-        if unit == "kg":
-            value, unit = value * 1000, "g"
-        elif unit == "l":
-            value, unit = value * 1000, "ml"
-        elif unit in ("pack", "pk"):
-            unit = "pk"
-        found.add(f"{value:g}{unit}")
-    return found
+    """Use the same whole-pack dimensions as current-price matching."""
+    parsed = size_from_text(str(text))
+    return {f"{parsed[1]:g}{parsed[2]}"} if parsed else set()
 
 
 def _sizes_compatible(wanted: str, candidate: str) -> bool:
@@ -207,29 +196,40 @@ class GrocerData:
         """Mirror the product name index built from grocer.nz's sitemaps."""
 
         async with self._lock("names"):
-            target = self._dir / NAMES_FILE
-            target.parent.mkdir(parents=True, exist_ok=True)
-            lines: list[str] = []
+            texts = []
             for url in SITEMAP_URLS:
                 text = await self._async_download_text(url)
                 if text is None:
                     return False
-                for line in text.splitlines():
-                    parsed = _parse_product_url(line)
-                    if parsed is not None:
-                        lines.append(f"{parsed[0]}\t{parsed[1]}")
-            if not lines:
+                texts.append(text)
+            if not await self.hass.async_add_executor_job(
+                self._replace_names, self._dir / NAMES_FILE, texts
+            ):
                 return False
-            temp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
-            try:
-                temp.write_text("\n".join(lines), encoding="utf-8")
-                temp.replace(target)
-            except OSError as err:
-                temp.unlink(missing_ok=True)
-                raise GrocerError("grocer.nz names could not be written") from err
             self._names = None
             self._mirror_bytes = None
             return True
+
+    @staticmethod
+    def _replace_names(target: Path, texts: list[str]) -> bool:
+        # Parsing the public catalogue and file writes belong off HA's loop.
+        lines = [
+            f"{parsed[0]}\t{parsed[1]}"
+            for text in texts
+            for line in text.splitlines()
+            if (parsed := _parse_product_url(line)) is not None
+        ]
+        if not lines:
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
+        try:
+            temp.write_text("\n".join(lines), encoding="utf-8")
+            temp.replace(target)
+        except OSError as err:
+            temp.unlink(missing_ok=True)
+            raise GrocerError("grocer.nz names could not be written") from err
+        return True
 
     async def _async_download_text(self, url: str) -> str | None:
         try:
@@ -285,6 +285,10 @@ class GrocerData:
                     async for chunk in response.content.iter_chunked(65536):
                         handle.write(chunk)
                         size += len(chunk)
+                        if size > 64 * 1024 * 1024:
+                            raise GrocerError(
+                                "grocer.nz asset exceeds the 64 MiB safety limit"
+                            )
         except (aiohttp.ClientError, TimeoutError) as err:
             temp.unlink(missing_ok=True)
             raise GrocerError("grocer.nz download failed") from err
@@ -299,12 +303,31 @@ class GrocerData:
             temp.unlink(missing_ok=True)
             raise
         try:
+            async with self._lock("parquet-decode"):
+                await self.hass.async_add_executor_job(
+                    self._validate_mirror, temp, target.name
+                )
             temp.replace(target)
+        except (ParquetError, ValueError) as err:
+            temp.unlink(missing_ok=True)
+            raise GrocerError(
+                "grocer.nz asset is invalid; retaining the previous mirror"
+            ) from err
+        except asyncio.CancelledError:
+            temp.unlink(missing_ok=True)
+            raise
         except OSError as err:
             temp.unlink(missing_ok=True)
             raise GrocerError("grocer.nz mirror could not be replaced") from err
         self._mirror_bytes = None
         return size
+
+    @staticmethod
+    def _validate_mirror(path: Path, name: str) -> None:
+        fields = list(
+            _STORE_COLUMNS if name.startswith("prices_") else _HISTORY_COLUMNS
+        )
+        read_columns(str(path), fields)
 
     async def async_sync_store_prices(self, store_id: int) -> bool:
         async with self._lock(f"store-{store_id}"):
@@ -330,7 +353,7 @@ class GrocerData:
         try:
             columns = read_columns(
                 str(path),
-                ["product_id", "original_price_cent", "sale_price_cent", "updated_at"],
+                list(_STORE_COLUMNS),
             )
         except ParquetError as err:
             raise GrocerError("grocer.nz store prices could not be read") from err
@@ -340,7 +363,7 @@ class GrocerData:
                 columns["original_price_cent"],
                 columns["sale_price_cent"],
                 columns["updated_at"],
-                strict=False,
+                strict=True,
             )
         )
         prices: dict[int, GrocerPrice] = {}
@@ -363,7 +386,8 @@ class GrocerData:
 
         async with self._lock(f"history-{product_id}"):
             target = self._dir / f"history_{product_id}.parquet"
-            if target.exists():
+            fresh = await self.hass.async_add_executor_job(self._history_fresh, target)
+            if fresh:
                 return True
             try:
                 await self._async_download(
@@ -371,8 +395,29 @@ class GrocerData:
                 )
             except GrocerError as err:
                 _LOGGER.debug("grocer.nz history sync failed: %s", err)
-                return False
+                return target.exists()
             return True
+
+    @staticmethod
+    def _history_fresh(target: Path) -> bool:
+        try:
+            return (
+                0
+                <= time.time() - target.stat().st_mtime
+                < GROCER_STORE_REFRESH_HOURS * 3600
+            )
+        except OSError:
+            return False
+
+    async def _async_history(
+        self, product_id: int, store_id: int
+    ) -> list[tuple[float, float]]:
+        # A product asset includes all stores; serialize large decodes rather
+        # than decoding a grocery list concurrently in HA's thread pool.
+        async with self._lock("parquet-decode"):
+            return await self.hass.async_add_executor_job(
+                self.history, product_id, store_id
+            )
 
     def history(self, product_id: int, store_id: int) -> list[tuple[float, float]]:
         """Return ``[(timestamp, price)]`` for one product at one store."""
@@ -381,7 +426,7 @@ class GrocerData:
         if not path.exists():
             return []
         try:
-            columns = read_columns(str(path), ["updated_at", "store_id", "price_cent"])
+            columns = read_columns(str(path), list(_HISTORY_COLUMNS))
         except ParquetError as err:
             raise GrocerError("grocer.nz history could not be read") from err
         rows = [
@@ -390,7 +435,7 @@ class GrocerData:
                 columns["updated_at"],
                 columns["store_id"],
                 columns["price_cent"],
-                strict=False,
+                strict=True,
             )
             if row_store == store_id
         ]
@@ -416,16 +461,11 @@ class GrocerData:
         *,
         tolerance: float = PRICE_TOLERANCE,
     ) -> GrocerMatch | None:
-        """Find the catalogue product behind a retailer's resolved product.
+        """Resolve only a strong, unambiguous name/pack/price match.
 
-        A name match alone is not trusted: the candidate's price must agree with
-        the price the retailer just quoted, either its regular or its sale price.
-        That makes an otherwise ambiguous name match self-validating, and it is
-        why this can safely import history rather than merely guess.
-
-        Pack size is not available from the sitemap slugs, so two sizes of the
-        same product that share a price cannot be told apart here; price
-        agreement is the protection.
+        Price agreement is corroboration, not product identity. If the retailer
+        states a pack size but the slug omits it, require an explicit pin rather
+        than attaching a potentially unrelated history.
         """
 
         if price is None:
@@ -451,26 +491,39 @@ class GrocerData:
                 continue
             if not target_tokens & set(label.split()):
                 continue
-            ratio = SequenceMatcher(None, target, label).ratio()
-            if ratio >= MIN_NAME_RATIO:
+            if not _sizes_compatible(name, label) or (
+                _sizes(name) and not _sizes(label)
+            ):
+                continue
+            ratio = SequenceMatcher(None, target, _normalise(label)).ratio()
+            # Don't silently substitute a missing brand/variant token.
+            if ratio >= MIN_NAME_RATIO and target_tokens <= set(
+                _normalise(label).split()
+            ):
                 scored.append((ratio, product_id, label))
         scored.sort(key=lambda item: item[0], reverse=True)
 
-        for ratio, product_id, label in scored[:25]:
-            row = prices[product_id]
-            if abs(row.regular - price) <= tolerance or (
-                row.sale is not None and abs(row.sale - price) <= tolerance
-            ):
-                history = await self.hass.async_add_executor_job(
-                    self.history, product_id, store_id
-                )
-                return GrocerMatch(
-                    product=GrocerProduct(product_id, label),
-                    price=row,
-                    history=history,
-                    name_ratio=ratio,
-                )
-        return None
+        agreeing = [
+            candidate
+            for candidate in scored
+            if abs(prices[candidate[1]].regular - price) <= tolerance
+            or (
+                prices[candidate[1]].sale is not None
+                and abs(prices[candidate[1]].sale - price) <= tolerance
+            )
+        ]
+        if not agreeing or (
+            len(agreeing) > 1 and agreeing[0][0] - agreeing[1][0] < 0.1
+        ):
+            return None
+        ratio, product_id, label = agreeing[0]
+        history = await self._async_history(product_id, store_id)
+        return GrocerMatch(
+            product=GrocerProduct(product_id, label),
+            price=prices[product_id],
+            history=history,
+            name_ratio=ratio,
+        )
 
     async def async_pinned_match(
         self, store_id: int, product_id: int
@@ -490,9 +543,7 @@ class GrocerData:
         label = names.get(product_id, str(product_id))
         if not await self.async_sync_history(product_id):
             return None
-        history = await self.hass.async_add_executor_job(
-            self.history, product_id, store_id
-        )
+        history = await self._async_history(product_id, store_id)
         if not history:
             return None
         return GrocerMatch(
@@ -510,10 +561,9 @@ class GrocerData:
         match = await self.async_match(store_id, name, price)
         if match is None:
             return None
-        if not match.history:
-            if not await self.async_sync_history(match.product.product_id):
-                return match
-            match = await self.async_match(store_id, name, price)
+        if not await self.async_sync_history(match.product.product_id):
+            return match
+        match.history = await self._async_history(match.product.product_id, store_id)
         return match
 
     # -- housekeeping -----------------------------------------------------
@@ -523,7 +573,14 @@ class GrocerData:
 
         if not self._dir.exists():
             return 0
-        return sum(p.stat().st_size for p in self._dir.glob("*") if p.is_file())
+        total = 0
+        for path in self._dir.glob("*"):
+            try:
+                if path.is_file():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+        return total
 
     async def async_mirrored_bytes(self) -> int:
         """Mirror size for diagnostics, measured off the event loop."""
@@ -544,14 +601,17 @@ class GrocerData:
 
         if not self._dir.exists():
             return 0
-        files = sorted(
-            (
-                (path.stat().st_mtime, path)
-                for path in self._dir.glob("history_*.parquet")
-                if path.is_file()
-            ),
-            key=lambda item: item[0],
-        )
+        files = []
+        for path in self._dir.glob("history_*.parquet"):
+            try:
+                files.append((path.stat().st_mtime, path))
+            except FileNotFoundError:
+                continue
+            except OSError as err:
+                raise GrocerError(
+                    "grocer.nz mirror metadata could not be read"
+                ) from err
+        files.sort(key=lambda item: item[0])
         removed = 0
         for _mtime, path in files:
             if len(files) - removed <= maximum:
@@ -562,7 +622,10 @@ class GrocerData:
                 product_id = -1
             if product_id in keep_products:
                 continue
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as err:
+                raise GrocerError("grocer.nz mirror could not be pruned") from err
             removed += 1
         if removed:
             self._mirror_bytes = None

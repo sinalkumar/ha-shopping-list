@@ -9,6 +9,7 @@ re-price the whole list.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
@@ -67,6 +68,40 @@ class PriceSnapshot:
     drops_now: dict[str, float] = field(default_factory=dict)
     failed: set[str] = field(default_factory=set)
     active: dict[str, int] = field(default_factory=dict)
+    observed_at: dict[str, float] = field(default_factory=dict)
+    errors: set[str] = field(default_factory=set)
+    store_history: dict[str, list[PricePoint]] = field(default_factory=dict)
+    last_attempt_at: float | None = None
+
+    @property
+    def item_count(self) -> int:
+        return sum(self.active.values())
+
+    def stale_for(self, key: str) -> bool:
+        observed = self.observed_at.get(key)
+        return (
+            key in self.errors
+            or observed is None
+            or time.time() - observed > PRICE_REFRESH_HOURS * 3600 + 300
+        )
+
+    @property
+    def stale_count(self) -> int:
+        return sum(
+            count for key, count, _quote in self._active_quotes() if self.stale_for(key)
+        )
+
+    @property
+    def status(self) -> str:
+        if self.last_attempt_at is None:
+            return "pending"
+        if not self.active:
+            return "empty"
+        if not self.priced_count:
+            return "unavailable"
+        if self.stale_count:
+            return "stale"
+        return "partial" if self.priced_count < self.item_count else "current"
 
     def points_for(self, key: str) -> list[PricePoint]:
         return self.history.get(key, [])
@@ -79,20 +114,29 @@ class PriceSnapshot:
         points = self.points_for(key)
         return max(point.price for point in points) if points else None
 
-    def reference_price(self, key: str) -> float | None:
-        """The most recent earlier price that was higher than the current one.
+    def reference_point(self, key: str) -> PricePoint | None:
+        """Most recent different observation, limited to the last 30 days.
 
-        This is what a "was" figure means when the retailer supplies none: a
-        price we actually observed, not an inferred or invented one.
+        This is historical evidence, never a retailer's normal/was price.
+        Stop at the immediately previous different price, not an ancient high.
         """
-
         quote = self.quotes.get(key)
         if quote is None:
             return None
+        now = time.time()
         for point in reversed(self.points_for(key)):
-            if point.price > quote.price:
-                return point.price
+            if 0 <= now - point.ts <= 30 * 86400 and point.price != quote.price:
+                return point
         return None
+
+    def reference_price(self, key: str) -> float | None:
+        point = self.reference_point(key)
+        quote = self.quotes.get(key)
+        return (
+            point.price
+            if point is not None and quote is not None and point.price > quote.price
+            else None
+        )
 
     def is_at_lowest(self, key: str) -> bool:
         lowest = self.lowest_for(key)
@@ -123,13 +167,17 @@ class PriceSnapshot:
         return [
             (key, quote)
             for key, _count, quote in self._active_quotes()
-            if quote.is_special
+            if quote.is_special and not self.stale_for(key)
         ]
 
     @property
     def savings(self) -> float:
         return round(
-            sum(quote.savings * count for _key, count, quote in self._active_quotes()),
+            sum(
+                quote.savings * count
+                for key, count, quote in self._active_quotes()
+                if not self.stale_for(key)
+            ),
             2,
         )
 
@@ -147,7 +195,10 @@ class PriceSnapshot:
         return [
             (key, quote, drop)
             for key, drop in self.drops_now.items()
-            if (quote := self.quotes.get(key)) is not None and not quote.is_special
+            if key in self.active
+            and not self.stale_for(key)
+            and (quote := self.quotes.get(key)) is not None
+            and not quote.is_special
         ]
 
     @property
@@ -202,6 +253,12 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._rerun_requested = False
         self._closed = False
         self._pins: dict[str, ProductPin] = {}
+        self._pin_versions: dict[str, int] = {}
+        self._identities: dict[str, str] = {}
+        self._history_products: dict[str, int] = {}
+        # Old scopes/products remain backed up, but never become comparison
+        # references for another product. The archive has the same global cap.
+        self._history_archive: dict[str, list[PricePoint]] = {}
         self._on_update: Callable[[], None] | None = None
         self._grocer_data: GrocerData | None = None
         self._hass_ref = hass
@@ -210,7 +267,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         # once per product rather than on every refresh.
         self._backfilled: set[str] = set()
         self._backfill_attempts: set[str] = set()
-        self._matched_products: set[int] = set()
+        self._matched_products: dict[str, int] = {}
         self._last_store_sync = 0.0
         self._mirror_bytes: int | None = None
         self._price_store = PriceStore(hass, entry.entry_id)
@@ -265,34 +322,53 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 or now - self._last_store_sync >= GROCER_STORE_REFRESH_HOURS * 3600
             ):
                 # Names rarely change, so they follow the store refresh.
-                await self.grocer.async_sync_names()
-                if await self.grocer.async_sync_store_prices(self.grocer_store_id):
+                names_ok = await self.grocer.async_sync_names()
+                store_ok = await self.grocer.async_sync_store_prices(
+                    self.grocer_store_id
+                )
+                if names_ok and store_ok:
                     self._last_store_sync = now
+                    # Product histories can gain observations too. Revisit them
+                    # after mirror refresh, not only after a HA restart.
+                    self._backfilled.clear()
         except GrocerError as err:
             _LOGGER.debug("grocer.nz sync failed: %s", err)
         if self.history_enabled:
             # Persist the sync timestamps, otherwise a profile that has not
             # matched anything yet re-downloads on every restart.
             await self._async_persist()
-            self._mirror_bytes = await self.grocer.async_mirrored_bytes()
-            # Bound the mirror so history is kept without growing forever.
-            keep = await self.hass.async_add_executor_job(self._retained_products)
-            trimmed = await self.hass.async_add_executor_job(
-                self.grocer.prune_history, keep, GROCER_HISTORY_FILE_MAX
-            )
-            if trimmed:
-                _LOGGER.debug("Trimmed %s mirrored history file(s)", trimmed)
+            try:
+                self._mirror_bytes = await self.grocer.async_mirrored_bytes()
+                # Cleanup is optional: a permissions/disk error here must not
+                # prevent current retailer lookups or their persistence.
+                keep = self._retained_products()
+                trimmed = await self.hass.async_add_executor_job(
+                    self.grocer.prune_history, keep, GROCER_HISTORY_FILE_MAX
+                )
+                if trimmed:
+                    _LOGGER.debug("Trimmed %s mirrored history file(s)", trimmed)
+            except (GrocerError, OSError) as err:
+                _LOGGER.debug("grocer.nz mirror maintenance deferred: %s", err)
 
     def _retained_products(self) -> set[int]:
         """Products still worth keeping history for: those on the current list."""
 
-        return set(self._matched_products)
+        active = {normalize_summary(summary) for summary in self._summaries()}
+        return {
+            product_id
+            for key, product_id in self._matched_products.items()
+            if key in active
+        } | {
+            pin.grocer_product_id
+            for pin in self._pins.values()
+            if pin.grocer_product_id is not None
+        }
 
     async def _async_backfill(self, key: str, quote: PriceQuote) -> None:
         """Import multi-year history for a validated grocer.nz match.
 
-        The match is validated against the price the retailer just quoted, so an
-        import cannot attach another product's history.
+        Automatic matching requires unambiguous name/pack/price evidence.
+        Otherwise only an explicit history product pin may import a series.
         """
 
         if (
@@ -305,6 +381,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         # Tracked separately from _backfilled: a transient failure must be
         # retried, while a definitive "no match" or a successful import should
         # not be attempted again.
+        version = self._pin_versions.get(key, 0)
         pin = self._pins.get(key)
         if pin is not None and pin.grocer_product_id:
             # An explicit choice: use exactly that product's history.
@@ -317,36 +394,69 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 match = None
             finally:
                 self._backfill_attempts.discard(key)
-            if match is not None and match.history:
-                self._apply_history(key, match)
+            if (
+                match is not None
+                and match.history
+                and version == self._pin_versions.get(key, 0)
+                and not self._closed
+            ):
+                self._apply_history(key, match, quote)
             return
         self._backfill_attempts.add(key)
         try:
             match = await self.grocer.async_match_with_history(
-                self.grocer_store_id, quote.product_name, quote.price
+                self.grocer_store_id,
+                f"{quote.product_name} {quote.size or ''}".strip(),
+                quote.price,
             )
         except GrocerError as err:
             _LOGGER.debug("grocer.nz match failed: %s", err)
             return
         finally:
             self._backfill_attempts.discard(key)
+        if self._closed or version != self._pin_versions.get(key, 0):
+            return
         if match is None:
-            # Definitive: this product is not in the catalogue, so stop asking.
-            self._backfilled.add(key)
+            # Missing mirrors and ambiguous matches are retryable, not a
+            # permanent decision that the product has no history.
             return
         if not match.history:
             return
-        self._apply_history(key, match)
+        self._apply_history(key, match, quote)
         self._backfilled.add(key)
 
-    def _apply_history(self, key: str, match: Any) -> None:
-        """Merge imported history with our own fresher observations."""
+    def _apply_history(self, key: str, match: Any, quote: PriceQuote) -> None:
+        """Merge history only after attaching it to this exact retailer product."""
 
+        if quote.chain == "woolworths":
+            self._matched_products[key] = match.product.product_id
+            # Anonymous Woolworths quotes are online, not this physical store.
+            # Mirror/show store history separately; never manufacture a drop by
+            # comparing the two scopes, even when today's prices happen to agree.
+            self._snapshot.store_history[key] = [
+                PricePoint(ts, price)
+                for ts, price in match.history_for(PRICE_HISTORY_MAX_POINTS)
+                if math.isfinite(ts) and math.isfinite(price) and price > 0
+            ]
+            self._backfilled.add(key)
+            return
+        old_identity = self._identities.get(key)
+        own_points = (
+            self._snapshot.history.get(key, [])
+            if (
+                old_identity is None
+                or json.loads(old_identity)[3:] == [quote.product_id, None]
+            )
+            else []
+        )
+        self._bind_history(
+            key, quote, verified_history_product=match.product.product_id
+        )
         imported = [
             PricePoint(ts, price)
             for ts, price in match.history[-PRICE_HISTORY_MAX_POINTS:]
         ]
-        existing = self._snapshot.history.get(key, [])
+        existing = [*own_points, *self._snapshot.history.get(key, [])]
         if existing:
             # Keep our own observations too: they are fresher than the mirror.
             merged = {round(point.ts): point for point in imported}
@@ -355,7 +465,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         else:
             combined = imported
         self._snapshot.history[key] = combined[-PRICE_HISTORY_MAX_POINTS:]
-        self._matched_products.add(match.product.product_id)
+        self._matched_products[key] = match.product.product_id
         self._backfilled.add(key)
         _LOGGER.debug(
             "Imported %s historical price point(s) for one item", len(imported)
@@ -401,6 +511,63 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             return
         self._on_update()
 
+    def _scope(self) -> list[Any]:
+        return [
+            self._chain_key,
+            self.entry.data.get(CONF_PRICE_STORE_ID) or "",
+            self.grocer_store_id,
+        ]
+
+    def _identity(self, key: str, quote: PriceQuote) -> str:
+        pin = self._pins.get(key)
+        history_product = (
+            pin.grocer_product_id
+            if pin and pin.grocer_product_id
+            else self._history_products.get(key)
+        )
+        return json.dumps(
+            [*self._scope(), quote.product_id, history_product], separators=(",", ":")
+        )
+
+    def _archive_history(self, key: str) -> None:
+        series = self._snapshot.history.pop(key, [])
+        identity = self._identities.pop(key, None)
+        if series and identity:
+            combined = {
+                point.ts: point
+                for point in [*self._history_archive.get(identity, []), *series]
+            }
+            self._history_archive[identity] = sorted(
+                combined.values(), key=lambda point: point.ts
+            )[-PRICE_HISTORY_MAX_POINTS:]
+        self._snapshot.drops_now.pop(key, None)
+        self._snapshot.store_history.pop(key, None)
+        self._matched_products.pop(key, None)
+        self._backfilled.discard(key)
+        self._history_products.pop(key, None)
+
+    def _bind_history(
+        self,
+        key: str,
+        quote: PriceQuote,
+        *,
+        verified_history_product: int | None = None,
+    ) -> None:
+        old_identity = self._identities.get(key)
+        if verified_history_product is not None:
+            self._history_products[key] = verified_history_product
+        elif old_identity and json.loads(old_identity)[3] != quote.product_id:
+            self._history_products.pop(key, None)
+        identity = self._identity(key, quote)
+        if old_identity == identity:
+            return
+        history_product = self._history_products.get(key)
+        self._archive_history(key)
+        if history_product is not None:
+            self._history_products[key] = history_product
+        self._identities[key] = identity
+        self._snapshot.history[key] = self._history_archive.pop(identity, [])
+
     async def async_load(self) -> None:
         """Restore pins and price history before the first reading."""
 
@@ -418,11 +585,15 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             if (value.get("chain") or "") != self._chain_key:
                 _LOGGER.debug("Dropping a pin recorded for a different chain")
                 continue
-            self._pins[key] = ProductPin.from_dict(self._chain_key, value)
+            try:
+                self._pins[key] = ProductPin.from_dict(self._chain_key, value)
+            except (TypeError, ValueError, OverflowError):
+                continue
         grocer = data.get("grocer") if isinstance(data.get("grocer"), dict) else {}
+        same_scope = data.get("scope") == self._scope()
         for attr, key in (("_last_store_sync", "store_at"),):
             value = grocer.get(key)
-            if isinstance(value, (int, float)):
+            if same_scope and isinstance(value, (int, float)) and math.isfinite(value):
                 setattr(self, attr, float(value))
         history = data.get("history")
         if isinstance(history, dict):
@@ -436,19 +607,64 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                     if parsed is not None:
                         series.append(parsed)
                 if series:
-                    self._snapshot.history[str(key)] = series[
+                    series = sorted(series, key=lambda point: point.ts)[
                         -PRICE_HISTORY_MAX_POINTS:
                     ]
+                    identity = entry.get("identity")
+                    try:
+                        parts = (
+                            json.loads(identity) if isinstance(identity, str) else []
+                        )
+                    except (ValueError, TypeError):
+                        parts = []
+                    if (
+                        same_scope
+                        and isinstance(parts, list)
+                        and len(parts) == 5
+                        and parts[:3] == self._scope()
+                    ):
+                        self._identities[str(key)] = identity
+                        self._snapshot.history[str(key)] = series
+                        if isinstance(parts[4], int) and parts[4] > 0:
+                            self._history_products[str(key)] = parts[4]
+                    else:
+                        # Legacy references lack provenance. Keep a bounded
+                        # backup for recovery, but don't invent discounts.
+                        self._history_archive[str(identity or f"legacy:{key}")] = series
+        archive = data.get("archived_history", {})
+        if isinstance(archive, dict):
+            for identity, raw in archive.items():
+                if isinstance(raw, list):
+                    points = [
+                        point
+                        for value in raw
+                        if (point := _parse_point(value)) is not None
+                    ]
+                    if points:
+                        self._history_archive[str(identity)] = points[
+                            -PRICE_HISTORY_MAX_POINTS:
+                        ]
         # A restored store can predate a lower bound, and a failed or disabled
         # refresh would never reach the trim in _prune, so bound it here too.
         self._trim_history(set(self._snapshot.history))
 
     async def _async_persist(self) -> None:
         self._trim_history(set(self._snapshot.history))
+        self._history_archive = dict(
+            list(self._history_archive.items())[-PRICE_HISTORY_MAX:]
+        )
         await self._price_store.async_save({
+            "scope": self._scope(),
+            "archived_history": {
+                identity: [[p.ts, p.price] for p in series]
+                for identity, series in self._history_archive.items()
+            },
             "pins": {key: pin.as_dict() for key, pin in self._pins.items()},
             "history": {
-                key: {"points": [[point.ts, point.price] for point in series]}
+                key: {
+                    "identity": self._identities.get(key),
+                    "points": [[point.ts, point.price] for point in series],
+                }
                 for key, series in self._snapshot.history.items()
             },
             "grocer": {"store_at": self._last_store_sync},
@@ -476,8 +692,11 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             product_name=product_name,
             grocer_product_id=grocer_product_id,
         )
-        # Forget what we concluded before; the pin replaces it.
+        # Invalidate both comparison identity and in-flight lookup results.
+        self._pin_versions[key] = self._pin_versions.get(key, 0) + 1
+        self._archive_history(key)
         self._snapshot.quotes.pop(key, None)
+        self._snapshot.observed_at.pop(key, None)
         self._snapshot.failed.discard(key)
         self._backoff_until.pop(key, None)
         self._attempts.pop(key, None)
@@ -489,7 +708,10 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         key = normalize_summary(summary)
         if self._pins.pop(key, None) is None:
             return
+        self._pin_versions[key] = self._pin_versions.get(key, 0) + 1
+        self._archive_history(key)
         self._snapshot.quotes.pop(key, None)
+        self._snapshot.observed_at.pop(key, None)
         self._snapshot.failed.discard(key)
         self._backoff_until.pop(key, None)
         self._attempts.pop(key, None)
@@ -588,14 +810,15 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
     async def _handle_refresh_interval(self, _now: Any = None) -> None:
         """Re-price everything on the slow interval, not just new items."""
 
-        self._force_full = True
-        await super()._handle_refresh_interval(_now)
+        self._unsub_refresh = None
+        await self.async_refresh(force=True)
 
     async def _async_update_data(self) -> PriceSnapshot:
         if self._client is None or self._closed:
             return self._snapshot
 
         now = time.monotonic()
+        self._snapshot.last_attempt_at = time.time()
         # One representative summary per normalized key, plus the real
         # multiplicity so duplicate items count as separate purchases.
         first_summary: dict[str, str] = {}
@@ -665,6 +888,11 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         for key in list(self._snapshot.quotes):
             if key not in active:
                 self._snapshot.quotes.pop(key, None)
+                self._snapshot.observed_at.pop(key, None)
+                self._snapshot.errors.discard(key)
+                self._snapshot.drops_now.pop(key, None)
+                self._snapshot.store_history.pop(key, None)
+                self._matched_products.pop(key, None)
         for key in list(self._snapshot.failed):
             if key not in active:
                 self._snapshot.failed.discard(key)
@@ -691,30 +919,42 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
 
     async def _async_price_one(self, key: str, summary: str) -> None:
         assert self._client is not None
+        version = self._pin_versions.get(key, 0)
         try:
             async with self._semaphore:
                 quote = await self._client.async_lookup(summary, self._pins.get(key))
         except PriceError:
+            if self._closed or version != self._pin_versions.get(key, 0):
+                return
+            self._snapshot.errors.add(key)
             self._schedule_retry(key)
             raise
         except Exception:
+            if self._closed or version != self._pin_versions.get(key, 0):
+                return
             # An unexpected error (a changed response shape, say) still needs
             # backoff, otherwise every source push retries it.
+            self._snapshot.errors.add(key)
             self._schedule_retry(key)
             raise
-        if self._closed:
+        if self._closed or version != self._pin_versions.get(key, 0):
             return
         self._attempts.pop(key, None)
         self._backoff_until.pop(key, None)
+        self._snapshot.errors.discard(key)
         if quote is None:
             # No confident match. Remember that so the item is not searched on
             # every cycle, but keep it retryable in case the item is renamed.
             self._snapshot.failed.add(key)
+            self._snapshot.quotes.pop(key, None)
+            self._snapshot.observed_at.pop(key, None)
+            self._snapshot.drops_now.pop(key, None)
             self._schedule_retry(key)
             return
         self._snapshot.failed.discard(key)
         self._record_history(key, quote)
         self._snapshot.quotes[key] = quote
+        self._snapshot.observed_at[key] = time.time()
         await self._async_backfill(key, quote)
 
     def _record_history(self, key: str, quote: PriceQuote) -> None:
@@ -724,6 +964,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         price is an earlier observation rather than the value being stored.
         """
 
+        self._bind_history(key, quote)
         series = self._snapshot.history.setdefault(key, [])
         now = time.time()
         last = series[-1] if series else None
@@ -732,7 +973,12 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         # appended afterwards, so the comparison cannot be against itself.
         # Only the keys observed in this cycle are touched, so a drop found
         # earlier survives an incremental refresh that did not re-price it.
-        if last is not None and last.price > quote.price and not quote.is_special:
+        if (
+            last is not None
+            and 0 <= now - last.ts <= 30 * 86400
+            and last.price > quote.price
+            and not quote.is_special
+        ):
             self._snapshot.drops_now[key] = round(last.price - quote.price, 2)
         else:
             self._snapshot.drops_now.pop(key, None)
@@ -762,6 +1008,26 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
     @property
     def snapshot(self) -> PriceSnapshot:
         return self._snapshot
+
+    def status_attributes(self) -> dict[str, Any]:
+        snapshot = self._snapshot
+        timestamps = [
+            snapshot.observed_at[key]
+            for key in snapshot.active
+            if key in snapshot.observed_at and key in snapshot.quotes
+        ]
+        return {
+            "price_status": snapshot.status,
+            "total_items": snapshot.item_count,
+            "priced_items": snapshot.priced_count,
+            "unpriced_items": snapshot.item_count - snapshot.priced_count,
+            "unmatched_items": snapshot.unmatched_count,
+            "stale_items": snapshot.stale_count,
+            "complete": snapshot.status in ("current", "empty"),
+            "last_attempt_at": snapshot.last_attempt_at,
+            "oldest_quote_at": min(timestamps) if timestamps else None,
+            "last_update_success": self.last_update_success,
+        }
 
     def as_diagnostics(self) -> dict[str, Any]:
         """Return counts only; product names and item text stay out of diagnostics."""

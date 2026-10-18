@@ -104,21 +104,30 @@ class BasketTotalSensor(RouteSensor):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.available and self.coordinator.prices.enabled
+        return (
+            self.coordinator.available
+            and self.coordinator.prices.enabled
+            and self.coordinator.prices.snapshot.status
+            in ("current", "partial", "empty")
+        )
 
     @property
     def native_value(self) -> float | None:
         if not self.coordinator.prices.enabled:
             return None
-        return self.coordinator.prices.snapshot.total
+        snapshot = self.coordinator.prices.snapshot
+        return (
+            snapshot.total
+            if snapshot.status in ("current", "partial", "empty")
+            else None
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         snapshot = self.coordinator.prices.snapshot
         return {
             "chain": self.coordinator.prices.chain,
-            "priced_items": snapshot.priced_count,
-            "unmatched_items": snapshot.unmatched_count,
+            **self.coordinator.prices.status_attributes(),
             "special_savings": snapshot.savings,
         }
 
@@ -141,13 +150,20 @@ class SpecialsSensor(RouteSensor):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.available and self.coordinator.prices.enabled
+        return (
+            self.coordinator.available
+            and self.coordinator.prices.enabled
+            and self.coordinator.prices.snapshot.status
+            in ("current", "partial", "empty")
+        )
 
     @property
     def native_value(self) -> int | None:
         if not self.coordinator.prices.enabled:
             return None
         snapshot = self.coordinator.prices.snapshot
+        if snapshot.status not in ("current", "partial", "empty"):
+            return None
         return len(snapshot.specials) + len(snapshot.drops)
 
     @property
@@ -170,7 +186,10 @@ class SpecialsSensor(RouteSensor):
                 "at_lowest": snapshot.is_at_lowest(key),
             }
             for key, quote in snapshot.quotes.items()
-            if quote.on_promotion and not quote.is_special
+            if key in snapshot.active
+            and not snapshot.stale_for(key)
+            and quote.on_promotion
+            and not quote.is_special
         ]
 
     @property
@@ -179,6 +198,7 @@ class SpecialsSensor(RouteSensor):
             return {}
         snapshot = self.coordinator.prices.snapshot
         return {
+            **self.coordinator.prices.status_attributes(),
             "items": [
                 {
                     "summary": key,

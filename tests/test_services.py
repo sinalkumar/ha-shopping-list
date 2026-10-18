@@ -3,6 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 from typing import ClassVar
+from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.exceptions import ServiceValidationError
@@ -207,6 +208,44 @@ def test_services_are_registered_once_for_all_profiles(hass) -> None:
 
     assert (DOMAIN, SERVICE_REFRESH) in hass.state.services
     assert (DOMAIN, SERVICE_CLEAR_CACHE) in hass.state.services
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"entity_id": [ROUTE_ENTITY]},
+        {"device_id": "device-1"},
+        {"area_id": "kitchen"},
+        {"floor_id": "ground"},
+        {"label_id": "shopping"},
+    ],
+)
+@pytest.mark.parametrize("denied", [ROUTE_ENTITY, "todo.source", None])
+def test_mutation_auth_checks_resolved_route_and_source(hass, target, denied):
+    coordinator = SimpleNamespace(
+        source=SimpleNamespace(entity_id="todo.source"), async_refresh=AsyncMock()
+    )
+    hass.state.expanded["indirectly_referenced"] = {ROUTE_ENTITY}
+    hass.data[DOMAIN] = {"synthetic-entry": coordinator}
+    hass.auth = SimpleNamespace(
+        async_get_user=AsyncMock(
+            return_value=SimpleNamespace(
+                permissions=SimpleNamespace(
+                    check_entity=lambda entity, _policy: entity != denied
+                )
+            )
+        )
+    )
+    integration._async_register_services(hass)
+    request = call(**target)
+    request.context = SimpleNamespace(user_id="synthetic-user")
+    if denied:
+        with pytest.raises(ServiceValidationError, match="Not authorized"):
+            asyncio.run(hass.state.services[DOMAIN, SERVICE_REFRESH](request))
+        coordinator.async_refresh.assert_not_awaited()
+    else:
+        asyncio.run(hass.state.services[DOMAIN, SERVICE_REFRESH](request))
+        coordinator.async_refresh.assert_awaited_once()
 
 
 def test_removed_entry_tears_down_a_surviving_coordinator(hass, monkeypatch) -> None:

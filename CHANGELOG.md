@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.8.0
+
+### Fixed
+
+- Preserve real source notes, including whitespace, through derived-list renames,
+  completion and editing. Automatic price blocks are marked and integrity-checked;
+  editing generated text or unsupported notes now returns an explicit error.
+- Strip only the item's actual view prefix, including overlapping section names.
+- Scope price histories to retailer/store/product and history-store/product IDs.
+  Re-pinning invalidates previous comparisons and in-flight results. Legacy
+  unscoped histories are backed up, not used to manufacture discounts.
+- Keep Woolworths physical-store history separate from non-store-scoped online
+  quotes. Historical references are dated, limited to 30 days, and never labelled
+  as the retailer's normal price.
+- Read every Parquet row group, validate column/row counts, normalize malformed
+  data errors, and validate downloads before replacing a last-good mirror.
+- Use one refresh lifecycle for scheduled/manual/source updates, including sync
+  and persistence. Expire history files after 12 hours, retry missing/ambiguous
+  matches, bound mirror retention to active matches/pins, and queue additions
+  received during an in-flight price request. Mirror cleanup errors defer cleanup
+  rather than skipping retailer pricing or price persistence.
+- Use exact retailer pack metadata; handle multipacks and counts, normalize
+  metric unit prices, and refuse unlabelled Woolworths multi-variant guesses.
+- Distinguish partial, stale, pending and unavailable basket estimates from a
+  genuinely empty zero-dollar basket. Stale prices do not claim current savings.
+
+### Added
+
+- Optional dependency-free shopping card with read-only price/size/unit rows,
+  source notes, expandable product/history details, UID-free section corrections,
+  product/history URL pins, pin reset, and confirmed deletion. Errors retain input;
+  mutations are read back before success. Register the resource manually as
+  documented in README; no dashboard configuration is changed automatically.
+- Permission-checked card data endpoint and source-control checks for mutations,
+  including device, area, floor and label service targets. Item data is not added
+  to new recorder attributes.
+- Named public history-store choices with retailer/store consistency validation;
+  no runtime DuckDB dependency. Public catalogue release tooling is development-only.
+- Regression/reference tests, frontend DOM tests in CI, and an isolated synthetic
+  browser harness covering desktop/mobile, edit/status/create/delete, corrections,
+  pins, failures, read-only controls, and price-quality states.
+
 ## 0.7.0
 
 ### Fixed

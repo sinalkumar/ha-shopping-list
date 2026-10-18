@@ -67,6 +67,7 @@ class RouteCoordinator:
         self._save_handle: asyncio.TimerHandle | None = None
         self._save_tasks: set[asyncio.Task[Any]] = set()
         self._price_task: asyncio.Task[Any] | None = None
+        self._price_again = False
         self._unsub_final_write: CALLBACK_TYPE | None = None
         self._closed = False
 
@@ -214,7 +215,10 @@ class RouteCoordinator:
     def _request_prices(self) -> None:
         """Price newly seen items without blocking the route update."""
 
-        if not self.prices.enabled or self._closed or self._price_task is not None:
+        if not self.prices.enabled or self._closed:
+            return
+        if self._price_task is not None:
+            self._price_again = True
             return
         task = self.entry.async_create_background_task(
             self.hass,
@@ -228,12 +232,19 @@ class RouteCoordinator:
 
     @callback
     def _clear_price_task(self, _task: asyncio.Task[Any]) -> None:
-        self._price_task = None
+        if self._price_task is _task:
+            self._price_task = None
+        if self._price_again and not self._closed:
+            self._request_prices()
 
     async def _async_price_then_notify(self) -> None:
         # Entities are notified by the price coordinator's update callback, so
         # this deliberately does not dispatch again.
-        await self.prices.async_refresh(force=False)
+        while not self._closed:
+            self._price_again = False
+            await self.prices.async_refresh(force=False)
+            if not self._price_again:
+                break
 
     @callback
     def _prune_retries(self, items: list[TodoItem]) -> None:

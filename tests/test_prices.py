@@ -1,6 +1,7 @@
 """Price matching, specials detection, and price-lookup isolation."""
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -1376,7 +1377,15 @@ def test_series_survives_a_restart(monkeypatch) -> None:
         SimpleNamespace(), entry, summaries=lambda: ["Butter"]
     )
     coordinator._price_store.initial = {
-        "history": {"butter": {"points": [[1000.0, 9.0]]}}
+        "scope": coordinator._scope(),
+        "history": {
+            "butter": {
+                "identity": coordinator._identity(
+                    "butter", quote("Pams Butter 500g", 9.0)
+                ),
+                "points": [[time.time() - 3600, 9.0]],
+            }
+        },
     }
     asyncio.run(coordinator.async_load())
     coordinator._client = Client()
@@ -1401,9 +1410,10 @@ def test_restored_series_tolerates_malformed_entries() -> None:
 
     asyncio.run(coordinator.async_load())
 
-    assert [p.price for p in coordinator.snapshot.points_for("good")] == [5.0]
-    assert coordinator.snapshot.points_for("bad") == []
-    assert [p.price for p in coordinator.snapshot.points_for("mixed")] == [5.0, 6.0]
+    assert coordinator.snapshot.history == {}
+    assert [p.price for p in coordinator._history_archive["legacy:good"]] == [5.0]
+    assert "legacy:bad" not in coordinator._history_archive
+    assert [p.price for p in coordinator._history_archive["legacy:mixed"]] == [5.0, 6.0]
 
 
 # --- Foodstuffs promotions --------------------------------------------------
@@ -1496,7 +1506,8 @@ def test_malformed_point_values_do_not_crash_restore() -> None:
 
     asyncio.run(coordinator.async_load())
 
-    assert [p.price for p in coordinator.snapshot.points_for("butter")] == [
+    assert coordinator.snapshot.history == {}
+    assert [p.price for p in coordinator._history_archive["legacy:butter"]] == [
         5.0,
         6.0,
         7.0,
@@ -1572,7 +1583,12 @@ def test_a_failed_refresh_does_not_erase_a_known_drop(monkeypatch) -> None:
         SimpleNamespace(), fake_entry(), summaries=lambda: ["Butter"]
     )
     coordinator._client = client
-    coordinator._snapshot.history["butter"] = [price_coordinator.PricePoint(0.0, 9.0)]
+    coordinator._identities["butter"] = coordinator._identity(
+        "butter", quote("Pams Butter 500g", 9.0)
+    )
+    coordinator._snapshot.history["butter"] = [
+        price_coordinator.PricePoint(time.time() - 3600, 9.0)
+    ]
     asyncio.run(coordinator._async_update_data())
     assert coordinator.snapshot.drop_for("butter") == 1.5
 
@@ -1594,7 +1610,10 @@ def test_a_failed_refresh_does_not_erase_a_known_drop(monkeypatch) -> None:
         ("Anchor Butter 500g", "500g", 0.5, "kg"),
         ("Musashi Energy Drink 500ml", "500ml", 0.5, "L"),
         ("Pams Milk 2L", "2L", 2.0, "L"),
-        ("Toilet Paper 12pk", "12pk", 0.0, ""),
+        ("Toilet Paper 12pk", "12pk", 12.0, "ea"),
+        ("Juice 6 x 250ml", "6 x 250ml", 1.5, "L"),
+        ("Juice 250ml x 6", "6 x 250ml", 1.5, "L"),
+        ("Vitamins 110 Pack", "110Pack", 110.0, "ea"),
         ("Something Without A Size", None, None, None),
     ],
 )
@@ -1614,8 +1633,11 @@ def test_size_is_parsed_from_the_product_name(text, label, amount, unit) -> None
     [
         (8.96, "Weet-Bix 1.2kg", "$7.47/kg"),
         (4.00, "Pams Milk 2L", "$2.00/L"),
+        (4.55, "Example Milk 2L", "$2.28/L"),
         (7.39, "Pure Butter 500g", "$14.78/kg"),
-        (6.59, "Toilet Paper 12pk", None),
+        (6.59, "Toilet Paper 12pk", "$0.55/ea"),
+        (9.0, "Juice 6 \u00d7 250ml", "$6.00/L"),
+        (22.0, "Gummies 110 Pack", "$0.20/ea"),
         (5.00, "No Size Here", None),
     ],
 )
@@ -1636,7 +1658,7 @@ def test_retailer_comparative_price_is_preferred() -> None:
             "unitQuantity": 100,
             "unitQuantityUom": "g",
         })
-        == "$1.48/100g"
+        == "$14.80/kg"
     )
     assert (
         _comparative_unit_price({
@@ -1696,49 +1718,47 @@ def test_paknsave_quote_uses_the_comparative_price() -> None:
 
     assert result is not None
     assert result.size == "500g"
-    assert result.unit_price == "$1.48/100g"
+    assert result.unit_price == "$14.78/kg"
 
 
 @pytest.mark.parametrize(
-    ("price", "comparative", "expected"),
+    ("pack", "expected_size", "expected_unit"),
     [
-        # 739c at 148c/100g -> 499.3g, rounded to a recognisable 500g
-        (
-            7.39,
-            {"pricePerUnit": 148, "unitQuantity": 100, "unitQuantityUom": "g"},
-            "500g",
-        ),
-        (
-            7.99,
-            {"pricePerUnit": 67, "unitQuantity": 100, "unitQuantityUom": "g"},
-            "1.2kg",
-        ),
-        # 349c at 698c/L -> 0.5L, reported as 500ml
-        (
-            3.49,
-            {"pricePerUnit": 698, "unitQuantity": 1, "unitQuantityUom": "L"},
-            "500ml",
-        ),
-        (
-            7.29,
-            {"pricePerUnit": 61, "unitQuantity": 1, "unitQuantityUom": "ea"},
-            "12ea",
-        ),
-        # A sheet count is not a useful pack size.
-        (
-            6.59,
-            {"pricePerUnit": 31, "unitQuantity": 100, "unitQuantityUom": "sheets"},
-            None,
-        ),
-        (5.0, {}, None),
+        ("500g", "500g", "$14.78/kg"),
+        ("2.25kg", "2.25kg", "$3.28/kg"),
+        ("", None, "$14.80/kg"),
     ],
 )
-def test_size_is_derived_from_comparative_pricing(price, comparative, expected) -> None:
-    """Foodstuffs names omit the size, but their per-unit price implies it."""
-
-    from smart_shopping_route.prices import _size_from_comparative
-
-    assert _size_from_comparative(price, comparative) == expected
+def test_exact_pack_metadata_not_reverse_rounded_price(
+    pack, expected_size, expected_unit
+):
+    client = PakNSavePriceClient(SimpleNamespace(), "store-1")
+    client._session = FakeSession([
+        FakeResponse(200, {"access_token": "anon"}),
+        FakeResponse(
+            200,
+            {
+                "products": [
+                    {
+                        "productId": "p1",
+                        "name": "Pure Butter",
+                        "displayName": pack,
+                        "singlePrice": {
+                            "price": 739,
+                            "comparativePrice": {
+                                "pricePerUnit": 148,
+                                "unitQuantity": 100,
+                                "unitQuantityUom": "g",
+                            },
+                        },
+                    }
+                ]
+            },
+        ),
+    ])
+    result = asyncio.run(client.async_lookup("butter"))
+    assert result.size == expected_size
+    assert result.unit_price == expected_unit
 
 
 def test_comparative_unit_price_drops_a_redundant_one() -> None:

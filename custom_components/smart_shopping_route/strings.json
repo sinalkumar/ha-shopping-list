@@ -13,20 +13,20 @@
           "show_completed": "Show completed items",
           "display_section_prefix": "Prefix item names with their section",
           "price_chain": "Price source",
-          "price_store_id": "Store",
-          "grocer_store_id": "grocer.nz store ID"
+          "price_store_id": "Current-price store (Pak'nSave)",
+          "grocer_store_id": "Price-history store (grocer.nz)"
         },
         "data_description": {
           "sections": "One section per line: SECTION NAME | optional hints. Line order is the walking route.",
           "display_section_prefix": "Only changes how the calculated list is displayed. The source list is never renamed.",
-          "price_chain": "Optional. Adds a price and specials indicator from a New Zealand supermarket. This sends each item name to that retailer's public product search. Choose none to send item names only to the AI Task.",
-          "price_store_id": "Pak'nSave only: store name or ID, because prices differ per store. Leave blank for Woolworths, whose public search is not store-scoped.",
-          "grocer_store_id": "Optional. The numeric grocer.nz store ID for multi-year price history, which is the only way to see Pak'nSave specials. Find it in the store's URL on grocer.nz. Left blank, the integration keeps its own history from the first reading instead."
+          "price_chain": "Optional. Sends each item name or pinned query to the chosen retailer's anonymous product search. Choose no prices to send names only to the AI Task.",
+          "price_store_id": "Pak'nSave: enter the exact store name or retailer ID. The name is resolved and saved for the shopping card. Leave blank for Woolworths: its online prices are not store-specific.",
+          "grocer_store_id": "Optional named public store for historical observations. Must match the retailer and, for Pak'nSave, the current-price store. Woolworths history is store-specific but its current online quote is not. New stores may require an integration update. No imported history keeps local observations only."
         }
       },
       "reconfigure": {
         "title": "Edit shopping route",
-        "description": "Changing route order does not reclassify items. Use Reclassify all after material hint changes.",
+        "description": "Changing route order does not reclassify items. Use Reclassify all after material hint changes. Old product/store histories remain backed up but are not reused for a different identity.",
         "data": {
           "profile_name": "Profile/store name",
           "source_entity_id": "Source to-do list",
@@ -35,15 +35,15 @@
           "show_completed": "Show completed items",
           "display_section_prefix": "Prefix item names with their section",
           "price_chain": "Price source",
-          "price_store_id": "Store",
-          "grocer_store_id": "grocer.nz store ID"
+          "price_store_id": "Current-price store (Pak'nSave)",
+          "grocer_store_id": "Price-history store (grocer.nz)"
         },
         "data_description": {
           "sections": "One section per line: SECTION NAME | optional hints. Line order is the walking route.",
           "display_section_prefix": "Only changes how the calculated list is displayed. The source list is never renamed.",
-          "price_chain": "Optional. Adds a price and specials indicator from a New Zealand supermarket. This sends each item name to that retailer's public product search. Choose none to send item names only to the AI Task.",
-          "price_store_id": "Pak'nSave only: store name or ID, because prices differ per store. Leave blank for Woolworths, whose public search is not store-scoped.",
-          "grocer_store_id": "Optional. The numeric grocer.nz store ID for multi-year price history, which is the only way to see Pak'nSave specials. Find it in the store's URL on grocer.nz. Left blank, the integration keeps its own history from the first reading instead."
+          "price_chain": "Optional. Sends each item name or pinned query to the chosen retailer's anonymous product search. Choose no prices to send names only to the AI Task.",
+          "price_store_id": "Pak'nSave: enter the exact store name or retailer ID. The name is resolved and saved for the shopping card. Leave blank for Woolworths: its online prices are not store-specific.",
+          "grocer_store_id": "Optional named public store for historical observations. Must match the retailer and, for Pak'nSave, the current-price store. Woolworths history is store-specific but its current online quote is not. New stores may require an integration update. No imported history keeps local observations only."
         }
       }
     },
@@ -64,7 +64,10 @@
       "price_store_not_found": "No Pak'nSave store matched that name.",
       "price_store_ambiguous": "More than one store matched; use the store ID.",
       "price_store_unavailable": "The Pak'nSave store list could not be reached.",
-      "grocer_store_invalid": "The grocer.nz store ID must be a number, for example 228."
+      "grocer_store_invalid": "Choose a valid positive grocer.nz store ID.",
+      "grocer_store_not_found": "Store is not in this release's public catalogue. Update the integration or choose no imported history.",
+      "grocer_store_chain_mismatch": "The history store must belong to the selected retailer.",
+      "grocer_store_mismatch": "The Pak'nSave current-price and history stores must be the same store."
     },
     "abort": {
       "reconfigure_successful": "The shopping route was updated."

@@ -38,10 +38,12 @@ from .models import (
 )
 from .prices import (
     CHAIN_PAKNSAVE,
+    CHAIN_WOOLWORTHS,
     CHAINS,
     PriceError,
     async_list_paknsave_stores,
 )
+from .stores import HISTORY_STORES
 
 
 def _store_key(name: str) -> str:
@@ -101,6 +103,8 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     field = CONF_PROFILE_NAME
                 elif key.startswith("price_store"):
                     field = CONF_PRICE_STORE_ID
+                elif key.startswith("grocer_store"):
+                    field = CONF_GROCER_STORE_ID
                 else:
                     field = "base"
                 errors[field] = key
@@ -110,6 +114,10 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_PROFILE_NAME: name,
                     CONF_PRICE_STORE_ID: price_store_id,
                     CONF_GROCER_STORE_ID: grocer_store_id,
+                    "price_store_name": self._resolved_store_name,
+                    "grocer_store_name": HISTORY_STORES.get(grocer_store_id, ("", ""))[
+                        1
+                    ],
                     CONF_SECTIONS: [
                         {"name": section.name, "hints": section.hints}
                         for section in sections
@@ -177,8 +185,21 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ): selector.TextSelector(),
             vol.Optional(
                 CONF_GROCER_STORE_ID,
-                default=defaults.get(CONF_GROCER_STORE_ID, ""),
-            ): selector.TextSelector(),
+                default=str(defaults.get(CONF_GROCER_STORE_ID) or ""),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value="", label="No imported history")
+                    ]
+                    + [
+                        selector.SelectOptionDict(value=str(store_id), label=name)
+                        for store_id, (_chain, name) in sorted(
+                            HISTORY_STORES.items(), key=lambda item: item[1][1]
+                        )
+                    ],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
         })
         return self.async_show_form(
             step_id="reconfigure" if reconfigure else "user",
@@ -189,19 +210,25 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _async_resolve_grocer_store(
         self, user_input: dict[str, Any]
     ) -> int | None:
-        """Read the grocer.nz store ID for price history.
-
-        This is a plain number because grocer.nz renders its store list in the
-        browser only, so there is no name lookup that needs no dependency. Left
-        blank, history is unavailable and the integration keeps its own.
-        """
+        """Validate a public, named history store without a runtime dependency."""
 
         wanted = str(user_input.get(CONF_GROCER_STORE_ID) or "").strip()
         if not wanted:
             return None
-        if not wanted.isdigit():
+        if not wanted.isdigit() or int(wanted) <= 0:
             raise ValueError("grocer_store_invalid")
-        return int(wanted)
+        store_id = int(wanted)
+        known = HISTORY_STORES.get(store_id)
+        if known is None:
+            raise ValueError("grocer_store_not_found")
+        chain = user_input.get(CONF_PRICE_CHAIN, DEFAULT_PRICE_CHAIN)
+        if known[0] != chain:
+            raise ValueError("grocer_store_chain_mismatch")
+        if chain == CHAIN_PAKNSAVE and _store_key(known[1]) != _store_key(
+            self._resolved_store_name
+        ):
+            raise ValueError("grocer_store_mismatch")
+        return store_id
 
     def _name_taken(self, name: str, *, exclude_entry_id: str | None = None) -> bool:
         """Names must be unique because they become entity names.
@@ -230,6 +257,11 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         chain = user_input.get(CONF_PRICE_CHAIN, DEFAULT_PRICE_CHAIN)
         store = str(user_input.get(CONF_PRICE_STORE_ID) or "").strip()
+        self._resolved_store_name = (
+            "Woolworths online (not store-specific)"
+            if chain == CHAIN_WOOLWORTHS
+            else ""
+        )
         if chain != CHAIN_PAKNSAVE:
             return ""
         if not store:
@@ -239,6 +271,7 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except PriceError as err:
             raise ValueError("price_store_unavailable") from err
         if store in stores:
+            self._resolved_store_name = stores[store]
             return store
         wanted = _store_key(store)
         matches = [
@@ -256,6 +289,7 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise ValueError("price_store_not_found")
         if len(matches) > 1:
             raise ValueError("price_store_ambiguous")
+        self._resolved_store_name = stores[matches[0]]
         return matches[0]
 
     def _validate_entities(self, user_input: dict[str, Any]) -> None:

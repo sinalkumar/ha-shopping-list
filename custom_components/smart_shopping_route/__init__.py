@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import voluptuous as vol
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import (
@@ -39,6 +42,14 @@ from .const import (
 from .coordinator import RouteCoordinator
 from .models import section_names
 from .storage import PriceStore, async_pop_store
+
+
+async def async_setup(hass: HomeAssistant, _config: dict[str, Any]) -> bool:
+    """Expose the optional card and permission-checked route read endpoint."""
+    from .ui import async_register_ui
+
+    await async_register_ui(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -141,11 +152,29 @@ def _async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, SERVICE_REFRESH):
         return
 
+    async def authorized(call: ServiceCall) -> RouteCoordinator:
+        coordinator = _coordinator_for_call(hass, call)
+        user_id = getattr(getattr(call, "context", None), "user_id", None)
+        if user_id:
+            # Permission checks must cover the resolved route even when the
+            # caller targets its device/area/label rather than an entity_id.
+            targets = {coordinator.source.entity_id, *_route_entity_ids(hass, call)}
+            user = await hass.auth.async_get_user(user_id)
+            if user is None or any(
+                not user.permissions.check_entity(target, POLICY_CONTROL)
+                for target in targets
+                if target
+            ):
+                raise ServiceValidationError(
+                    "Not authorized to control this route and source"
+                )
+        return coordinator
+
     async def refresh(call: ServiceCall) -> None:
-        await _coordinator_for_call(hass, call).async_refresh()
+        await (await authorized(call)).async_refresh()
 
     async def set_section(call: ServiceCall) -> None:
-        coordinator = _coordinator_for_call(hass, call)
+        coordinator = await authorized(call)
         section = call.data[ATTR_SECTION]
         if section not in section_names(coordinator.sections):
             raise ServiceValidationError("Section is not configured for this route")
@@ -158,15 +187,15 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
     async def forget(call: ServiceCall) -> None:
         try:
-            await _coordinator_for_call(hass, call).async_forget(_item_uid(call))
+            await (await authorized(call)).async_forget(_item_uid(call))
         except ValueError as err:
             raise ServiceValidationError(str(err)) from err
 
     async def reclassify(call: ServiceCall) -> None:
-        await _coordinator_for_call(hass, call).async_reclassify_all()
+        await (await authorized(call)).async_reclassify_all()
 
     async def pin_product(call: ServiceCall) -> None:
-        coordinator = _coordinator_for_call(hass, call)
+        coordinator = await authorized(call)
         if not coordinator.prices.enabled:
             raise ServiceValidationError("Pricing is not enabled for this route")
         try:
@@ -181,7 +210,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             raise ServiceValidationError(str(err)) from err
 
     async def unpin_product(call: ServiceCall) -> None:
-        coordinator = _coordinator_for_call(hass, call)
+        coordinator = await authorized(call)
         try:
             item = coordinator.item_by_uid(_item_uid(call))
         except ValueError as err:
@@ -189,9 +218,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         await coordinator.prices.async_unpin(item.summary or "")
 
     async def clear(call: ServiceCall) -> None:
-        await _coordinator_for_call(hass, call).async_clear_cache(
-            call.data[ATTR_INCLUDE_MANUAL]
-        )
+        await (await authorized(call)).async_clear_cache(call.data[ATTR_INCLUDE_MANUAL])
 
     hass.services.async_register(
         DOMAIN,

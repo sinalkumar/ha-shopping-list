@@ -67,6 +67,37 @@ The optional display prefix produces names such as `Dairy · Milk` in the proxy 
 
 Each profile appears as one service device, grouping the calculated Todo entity, the refresh button, and the status sensor.
 
+## Shopping card (recommended for desktop and mobile)
+
+The native to-do list remains supported. Its automatic price block is marked
+read-only and checked before saves; your source notes stay separate below it.
+Editing automatic price text is rejected, not silently discarded. Sources that
+cannot store notes reject note edits explicitly.
+
+For clearer prices and corrections without copying UIDs, add the optional card:
+
+1. After updating and restarting, open **Settings → Dashboards → Resources**
+   (enable Advanced Mode in your profile if Resources is hidden).
+2. Add `/smart_shopping_route/route-card.js?v=0.8.0` as a **JavaScript module**.
+3. Add a manual dashboard card:
+
+```yaml
+type: custom:smart-shopping-route-card
+entity: todo.example_supermarket
+```
+
+The card has a prominent price/size/unit row, expandable matched-product and
+historical observations, original notes, and an explicit basket coverage/freshness
+banner. **Edit** provides note/name editing, **Move to section**, **Wrong product?**
+search/product/history pins, reset matching, and confirmed deletion. Prices are
+read-only, with no floating button covering the last row. Duplicate names retain
+independent source UIDs; product pins apply to every occurrence of the same name.
+
+Private item data is fetched through an authenticated WebSocket endpoint, not
+stored in new entity attributes. Both route and source permissions are checked;
+read-only users cannot mutate either. Resource registration is manual: updating
+this integration does not modify your dashboard.
+
 ## Actions and Assist
 
 All actions use the standard target selector, so an entity, device, area, floor, or label that resolves to exactly one route works. Targeting an ambiguous selection is refused:
@@ -87,7 +118,7 @@ data:
   remember: true
 ```
 
-The source item UID is the stable identifier the source to-do integration assigns to an item. The calculated list does not display it; read it from the source integration or its own API when you need to correct one specific duplicate.
+The source UID is the stable identifier assigned by the source integration. The shopping card supplies it automatically for corrections. For YAML actions, read it with `todo.get_items`; duplicate names may have different UIDs.
 
 Each profile also creates a **Refresh shopping route** button suitable for exposure to Assist. Costly or destructive actions are not buttons.
 
@@ -101,10 +132,24 @@ Pricing is optional per profile and off by default. Set **Price source** while c
 | Woolworths | No | Price per item, plus a real was-price and savings when the item is on special. Anonymous search is not store-scoped, so this is the online price. |
 | Pak'nSave | Yes | Per-store price. The Foodstuffs API exposes **no was-price at all**, so no specials are claimed for this chain. |
 
-When enabled, each incomplete item gains a description such as `$8.50 · was $9.70 · Anchor Butter 500g`, which the standard to-do card already renders. Two sensors are added:
+When enabled, incomplete items have an automatic price block, for example
+`$8.50 · was $9.70 · 500g · $17.00/kg · Example Butter`, plus the source's own notes.
+Woolworths pack sizes come from the product title; Pak'nSave uses its exact
+`displayName` pack metadata. Multipacks such as `6 x 250ml` use the total 1.5L,
+and count packs support per-item prices. Metric comparisons use `/kg` and `/L`
+consistently. A rounded comparative price is never used to invent an exact size.
 
-- **Basket total**: the sum of known prices, with `priced_items`, `unmatched_items`, and `special_savings` attributes.
-- **Specials**: how many listed items are discounted, with an `items` attribute carrying `summary`, `product`, `price`, `was_price`, `savings`, and `valid_until` for each one.
+Two sensors are added:
+
+- **Basket total**: an estimate of the known prices. `price_status` is `pending`,
+  `unavailable`, `partial`, `stale`, `current` or `empty`. `total_items`,
+  `priced_items`, `unpriced_items`, `unmatched_items`, `stale_items`, `complete`,
+  `last_attempt_at`, `oldest_quote_at` and `last_update_success` explain coverage.
+  A partial numeric total excludes unpriced items. Pending, fully unpriced or
+  stale totals are unavailable, not a misleading zero. A genuinely empty basket
+  is zero. Timestamp attributes are Unix seconds.
+- **Specials**: retailer-reference specials and recent same-product price drops,
+  with item details in attributes. Stale observations do not claim current savings.
 
 Prices refresh every 12 hours on their own schedule, and each item is priced once and then reused, so adding one item does not re-price the list. Pricing never blocks the route: a slow or failing retailer leaves the list working, and a failed lookup backs off instead of retrying every cycle.
 
@@ -119,7 +164,7 @@ Household shorthand rarely looks like a product title. When automatic matching c
 ```yaml
 action: smart_shopping_route.pin_item_product
 target:
-  entity_id: todo.woolworths_manukau_mall
+  entity_id: todo.example_supermarket
 data:
   item_uid: "0123456789abcdef0123456789abcdef"
   query: Kids Multivitamin Gummies
@@ -135,7 +180,12 @@ Pins are per profile and per chain, because each retailer has its own catalogue.
 
 ### Multi-year history from grocer.nz
 
-[grocer.nz](https://grocer.nz) publishes its New Zealand grocery dataset as public, unauthenticated files. Set **grocer.nz store ID** while configuring to use it — the number in the store's URL on grocer.nz (for example `228` is PAK'nSAVE Ormiston):
+[grocer.nz](https://grocer.nz) publishes public, unauthenticated grocery data.
+Choose **Price-history store (grocer.nz)** from the named store list. It is not
+**Current-price store (Pak'nSave)**, which accepts the retailer's name/ID.
+The selected retailer must agree, and Pak'nSave's two stores must be the same.
+Resolved names appear in the shopping card. The public store choices are bundled
+for offline validation; newly opened stores may require an integration update.
 
 | What it gives | Why it matters |
 |---|---|
@@ -143,17 +193,29 @@ Pins are per profile and per chain, because each retailer has its own catalogue.
 | Sale prices for Woolworths (29% of their catalogue) | Cross-checks the retailer's own was-price |
 | A store catalogue across 6 banners and 475 stores | Resolves store names, and compares across chains |
 
-Data is mirrored to `.storage/smart_shopping_route/grocer/`: your store's price file and each matched product's history file, refreshed every 12 hours. **The mirror is deliberate:** if grocer.nz is unreachable the integration keeps using the local copy, and the history it already downloaded is never thrown away.
+Data is mirrored to `.storage/smart_shopping_route/grocer/`. Scheduled refreshes
+sync the name/store files and expire matched product history files after 12 hours.
+New Parquet assets are validated completely before atomic replacement; an outage
+or corrupt response retains the previous good mirror. Parsing and large reads run
+off Home Assistant's event loop. Mirroring is deliberate so downloaded history
+remains usable during an outage, subject to the bounded pruning policy.
 
-History is imported only when the match is **self-validating**: the catalogue product's price must agree with the price the retailer just quoted, either its regular or its sale price. A name that merely looks similar is not enough, so another product's history cannot be attached to your item. Once imported, a series looks like this:
+Price agreement alone is **not product identity**. Automatic history matching
+requires strong unambiguous names, compatible explicit pack sizes and an agreeing
+price. Slugs often omit pack sizes; those products need an explicit
+`grocer_product_id` pin rather than a guessed history. Transient mirror absence is
+retryable. You can enter the product ID or its grocer.nz product URL in the card.
 
-```
-Weet-Bix 1.2kg at PAK'nSAVE Ormiston
-  1,533 daily readings · 2022-06-14 → now · 147 price changes
-  lowest $4.49 · highest $8.49 · now $7.99
-```
+Woolworths current quotes are online, not store-specific: physical-store history
+is backed up and displayed separately, never merged into online quote history or
+used to claim online savings. Pak'nSave history is compared only within the
+configured product/store identity. The card shows up to ten recent observations;
+the full downloaded public history remains in the mirror, while comparison series
+are bounded to 60 points per item.
 
-If you leave **Price history store** blank, the integration keeps its own history from the first reading instead, which works but starts today. grocer.nz is a third party: nothing here depends on it, and the route, classification, and current prices all work without it.
+Choose **No imported history** to keep only local observations from the first
+reading. The route, classification and current retailer prices do not depend on
+grocer.nz being reachable.
 
 ### Price history and drops
 
@@ -161,7 +223,7 @@ Woolworths publishes a real was-price, so specials are detected from it. Pak'nSa
 
 That series is what makes the following possible, and it only becomes useful after the first price change:
 
-- **Drops**: an item is reported as a drop when it is cheaper than a previously observed price. The `was` figure in that case is a price we actually saw, never an inferred one.
+- **Drops**: a fresh quote is lower than the immediately previous observed price of the same product/store within 30 days. Historical text says **previously seen $X (date)**. Only a retailer-provided reference is called **was**; an ancient high is not a normal price.
 - **Lowest seen**: `lowest_seen` and `at_lowest` say whether the current price is the cheapest recorded.
 
 Pak'nSave does flag promotions — its search payload carries the same promotion records as the product detail endpoint, so no extra requests are made. But most of those promotions are **price locks whose reward value equals the shelf price** (357 promotions sampled, only 5 below the shelf price), so a promotion record is reported as `promotions` context and is deliberately **never** counted as savings.
@@ -174,7 +236,13 @@ The Specials sensor therefore separates three things:
 | `price_drops` | Items cheaper than a previously observed price, with `previous_price`, `drop`, `lowest_seen`, `at_lowest` |
 | `promotions` | Retailer flags a promotion but no reduction is known, with `lowest_seen`, `at_lowest` |
 
-Price history and pins are stored in `.storage/smart_shopping_route.prices.<entry_id>` so a restart does not reset them, and both are deleted when the profile is removed.
+Price history and pins are stored in `.storage/smart_shopping_route.prices.<entry_id>`
+and deleted when the profile is removed. Series carry chain, retailer store/product
+and history store/product identities. Re-pinning invalidates dependent comparisons
+and in-flight results. Changing scopes cannot create a false price drop.
+Legacy histories without provenance are retained in a bounded backup but excluded
+from comparisons; observations rebuild under verified identities. Old scoped
+series are archived separately, with bounded retention.
 
 Known limits: Pak'nSave prices are per store, so a profile is tied to the store chosen at setup, and the drop signal only becomes meaningful after the first price change.
 
@@ -202,33 +270,34 @@ No other Home Assistant state, history, or credentials are sent to either. Price
 
 For Pak'nSave the chosen store ID is sent with each lookup, because prices are per store. That identifies which store you shop at, so use **No prices** or Woolworths if you would rather not share it.
 
-Locally, the profile cache persists normalized item summaries and their sections in Home Assistant storage (`.storage/smart_shopping_route.cache.<entry_id>`) so classification is not repeated. That file is local user data and is deleted when the config entry is removed. Prices are held in memory only. Diagnostics contain counts and feature flags only, never item text, UIDs, product names, profile names, entity IDs, or hints. Logs never include item summaries.
+Locally, the profile cache persists normalized item summaries and their sections in Home Assistant storage (`.storage/smart_shopping_route.cache.<entry_id>`) so classification is not repeated. That file is local user data and is deleted when the config entry is removed. Current quotes and their freshness timestamps are held in memory only. Normalized item names, pins/search queries and scoped price histories persist in the price storage file. Public grocer assets are mirrored separately and shared across profiles. Specials sensor item attributes can also be retained by Home Assistant recorder/history/backups; exclude those entities from recorder if you do not want that retention. The optional shopping card fetches notes and names only in permission-checked responses; it adds no item-bearing recorder attributes. Diagnostics contain counts and feature flags only, never item text, UIDs, product names, profile names, entity IDs, or hints. Logs never include item summaries.
 
 ## Troubleshooting
 
 - **Route unavailable:** confirm the selected source entity exists and is available. The AI Task entity is not required for availability. Reconfigure if an entity ID changed.
 - **Items stay unclassified:** test the selected AI Task in Home Assistant, press the refresh button, and inspect sanitized Home Assistant logs. The status sensor's `pending_classifications` and `scheduled_retries` attributes show whether work is queued or backing off.
-- **Wrong section:** call `set_item_section` with the source UID and `remember: true`.
-- **An item shows no price:** the retailer's search had no confident match. Rename the item to something closer to a product title, or accept it staying unpriced. `unmatched_items` on the basket total sensor shows how many are in that state.
+- **Wrong section:** use **Edit → Move to section** in the shopping card, or call `set_item_section` with a source UID.
+- **An item shows no price:** use **Edit → Wrong product?** to pin a better search without renaming the source item. The coverage banner distinguishes unpriced, partial and stale estimates. A blank history may need an explicit grocer product pin.
 - **Prices look like the wrong product:** pin the item with `pin_item_product` and, if needed, its exact `product_id`. Matching prefers the retailer's own relevance order, so the plainest product usually wins, but shorthand and supplements still need a pin.
 - **Changed hints:** call `reclassify_all` if you want new classifications; route order changes alone need no reclassification.
 - **Debugging:** enable debug logging for `custom_components.smart_shopping_route`. Logs intentionally omit item summaries.
 
-## Limitations in v0.2.0
+## Limitations
 
 - No manual `MOVE_TODO_ITEM`; sorting is calculated.
 - The config form uses one multiline route field rather than a drag-and-drop editor.
 - A section rename is treated as removal plus addition, invalidating only decisions that referenced the old name.
-- Corrections are keyed by source UID, which the calculated list does not display.
+- YAML corrections use source UIDs; the optional shopping card handles these automatically.
 - Home Assistant 2026.8 still requires an isolated internal `EntityComponent` lookup to obtain the source Todo entity for push subscriptions.
 - Prices are estimates from public product search, not a quote. Quantities in item names are not interpreted, so `2x milk` is priced as one unit.
-- Price history starts when the feature is enabled, so a price that fell before that is not reported as a drop.
+- Without an imported, verified history, comparisons start from local observations. Historical references use a 30-day lookback.
 - Pak'nSave promotions cannot be turned into a savings figure, because the API provides no reference price for them.
 - Woolworths prices are the online price and are not tied to a physical store.
-- No manual product pin yet, and no price history beyond the current reading for Pak'nSave.
+- Product and history pins require a suitable search or exact catalogue ID; missing/ambiguous metadata is deliberately left unmatched.
+- Public store choices are refreshed at release time, not fetched at runtime. Maintainers can rebuild them with `scripts/update_store_catalog.py --database <public-base.duckdb>` using development-only DuckDB.
 
 ## Uninstall
 
-Remove every Smart Shopping Route config entry, uninstall it in HACS, and restart Home Assistant. Removing a config entry deletes its classification cache file. Source lists and items are not deleted. Never edit `.storage` while Home Assistant is running.
+Remove every Smart Shopping Route config entry, uninstall it in HACS, and restart Home Assistant. Removing a config entry deletes its classification cache and private price/pin file. The shared public grocer mirror is bounded/pruned separately so other profiles can keep using it. Source lists and items are not deleted. Never edit `.storage` while Home Assistant is running.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before opening a public issue or pull request.

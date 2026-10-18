@@ -3,8 +3,10 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from homeassistant.components.todo import TodoItem
 from homeassistant.components.todo.const import TodoItemStatus, TodoListEntityFeature
+from homeassistant.exceptions import ServiceValidationError
 
 import smart_shopping_route.todo as todo_module
 from smart_shopping_route.models import RouteSection
@@ -44,13 +46,16 @@ class FakePrices:
 
     def __init__(self, quotes=None) -> None:
         self._quotes = quotes or {}
+        self.enabled = bool(self._quotes)
 
     def quote_for(self, summary):
         return self._quotes.get(summary)
 
     @property
     def snapshot(self):
-        return SimpleNamespace(reference_price=lambda _key: None)
+        return SimpleNamespace(
+            reference_point=lambda _key: None, stale_for=lambda _key: False
+        )
 
 
 class Coordinator:
@@ -159,11 +164,10 @@ def test_unknown_future_source_features_are_masked(monkeypatch) -> None:
         TodoListEntityFeature.UPDATE_TODO_ITEM
     ) | (1 << 12)
     features = entity._proxy_features()
-    # The unknown bit is dropped; description is always advertised because the
-    # price line lives there and the to-do dialog sends it back on save.
+    # Unknown features and unsupported editable fields are not advertised.
     assert features & (1 << 12) == 0
     assert features & int(TodoListEntityFeature.UPDATE_TODO_ITEM)
-    assert features & int(TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM)
+    assert not features & int(TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM)
 
 
 def test_entity_is_grouped_under_one_profile_device() -> None:
@@ -199,7 +203,7 @@ def test_entity_uses_coordinator_sections(monkeypatch) -> None:
             )
         )
     )
-    assert seen["sections"] == ("Produce", "Dairy", "Unclassified / Other")
+    assert seen["sections"] == ("Dairy",)
 
 
 def test_price_is_rendered_with_size_and_unit_price() -> None:
@@ -218,9 +222,10 @@ def test_price_is_rendered_with_size_and_unit_price() -> None:
 
     descriptions = [item.description for item in entity.todo_items]
 
-    assert descriptions[0] == (
-        "$8.50 · was $9.70 · 500g · $1.70/100g · Anchor Butter 500g"
+    assert (
+        "$8.50 · was $9.70 · 500g · $1.70/100g · Anchor Butter 500g" in descriptions[0]
     )
+    assert "automatic; edit notes below" in descriptions[0]
 
 
 def test_plain_price_has_no_was_suffix() -> None:
@@ -231,7 +236,7 @@ def test_plain_price_has_no_was_suffix() -> None:
         )
     })
 
-    assert entity.todo_items[0].description == "$4.00 · Pams Milk 2L"
+    assert "$4.00 · Pams Milk 2L" in entity.todo_items[0].description
 
 
 def test_unpriced_items_keep_no_description() -> None:
@@ -268,27 +273,68 @@ def test_description_is_advertised_even_when_the_source_lacks_it() -> None:
 
     entity, coordinator = make_entity()
     coordinator.source.supported_features = int(TodoListEntityFeature.UPDATE_TODO_ITEM)
+    coordinator.prices.enabled = True
+    entity._attr_supported_features = entity._proxy_features()
 
     assert entity.supported_features & int(
         TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
     )
 
 
-def test_updating_an_item_drops_the_derived_description() -> None:
-    """The description is generated from prices, so a stale copy must not be forwarded."""
-
+def test_updating_an_item_strips_only_our_price_block() -> None:
     entity, coordinator = make_entity(prefix=True)
+    coordinator.prices = FakePrices({"Milk": PriceQuote("paknsave", "1", "Milk", 4)})
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+    displayed.summary = "Dairy · Oat milk"
+    asyncio.run(entity.async_update_todo_item(displayed))
+    assert coordinator.source.updated[0].summary == "Oat milk"
+    assert coordinator.source.updated[0].description is None
+
+
+@pytest.mark.parametrize("priced", [False, True])
+def test_notes_survive_rename_completion_and_edit(priced) -> None:
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features |= int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+    coordinator.items[0].description = "Keep chilled\nSecond line"
+    if priced:
+        coordinator.prices = FakePrices({
+            "Milk": PriceQuote("paknsave", "1", "Milk", 4)
+        })
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+    assert "Keep chilled\nSecond line" in displayed.description
+    displayed.summary = "Oat milk"
+    displayed.status = TodoItemStatus.COMPLETED
+    asyncio.run(entity.async_update_todo_item(displayed))
+    assert coordinator.source.updated[-1].description == "Keep chilled\nSecond line"
+    displayed.description = displayed.description.replace("Keep chilled", "Buy organic")
+    asyncio.run(entity.async_update_todo_item(displayed))
+    assert coordinator.source.updated[-1].description == "Buy organic\nSecond line"
     asyncio.run(
         entity.async_update_todo_item(
-            TodoItem(
-                uid="uid-1",
-                summary="Dairy · Milk",
-                description="$9.99 · stale price",
-                status=TodoItemStatus.NEEDS_ACTION,
-            )
+            TodoItem(uid="uid-1", summary="Milk", description="")
         )
     )
+    assert coordinator.source.updated[-1].description == ""
 
-    forwarded = coordinator.source.updated[0]
-    assert forwarded.summary == "Milk"
-    assert forwarded.description is None
+
+def test_unsupported_notes_are_rejected_not_silently_lost() -> None:
+    entity, coordinator = make_entity()
+    for method in (entity.async_create_todo_item, entity.async_update_todo_item):
+        with pytest.raises(ServiceValidationError, match="does not support notes"):
+            asyncio.run(
+                method(TodoItem(uid="uid-1", summary="Milk", description="Real note"))
+            )
+    assert not coordinator.source.created and not coordinator.source.updated
+
+
+def test_create_preserves_supported_notes() -> None:
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features |= int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+    asyncio.run(
+        entity.async_create_todo_item(TodoItem(summary="Milk", description="Real note"))
+    )
+    assert coordinator.source.created[0].description == "Real note"
