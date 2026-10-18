@@ -9,6 +9,7 @@
 - `clear_cache` with `include_manual: true` now also clears per-item corrections.
 - Unclassifiable items and provider failures are no longer re-sent to the AI provider on every source update. A low-confidence or explicit **Unclassified / Other** answer is cached; failures back off exponentially.
 - The display prefix is only stripped from edited summaries when the prefix feature is enabled, so user text such as `Dairy · Milk` is preserved.
+- The refresh button no longer stays `unavailable` after a restart. It derives availability but never re-wrote its state, so it kept whatever it computed during platform setup, when the source entity was often not yet resolvable. It now subscribes to coordinator updates and source state changes, like the sensor already did.
 - Section definitions tolerate unknown persisted keys instead of failing the profile with a permanent retry loop.
 - Source feature bits unknown to this version are masked out of the calculated entity.
 

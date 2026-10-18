@@ -11,8 +11,10 @@ from smart_shopping_route.sensor import UnclassifiedSensor
 class Coordinator:
     available = True
     ai_available = True
+    signal = "smart_shopping_route_synthetic-entry_update"
 
     def __init__(self) -> None:
+        self.source = SimpleNamespace(entity_id="todo.synthetic_source")
         self.unclassified_count = 3
         self.retry_scheduled_count = 1
         self.pending = {"milk", "bread"}
@@ -87,3 +89,67 @@ def test_device_info_falls_back_to_the_entry_title() -> None:
     info = route_device_info(without_profile_name)
 
     assert info["name"] == "Fallback name"
+
+
+def test_button_refreshes_availability_when_the_source_changes() -> None:
+    """A derived availability must be re-written, not computed once at setup.
+
+    On a live install the refresh button sat at "unavailable" forever while the
+    route entity was healthy, because only subscribing entities re-write state.
+    """
+
+    import smart_shopping_route.button as button_module
+
+    coordinator = Coordinator()
+    button = RefreshRouteButton(entry(), coordinator)
+
+    connections: list[tuple[str, object]] = []
+    tracked: list[list[str]] = []
+
+    class FakeDispatcher:
+        @staticmethod
+        def connect(_hass, signal, target):
+            connections.append((signal, target))
+            return lambda: None
+
+    class FakeTrack:
+        @staticmethod
+        def __call__(_hass, entity_ids, _target):
+            tracked.append(list(entity_ids))
+            return lambda: None
+
+    class FakeEntity:
+        hass = object()
+
+        def async_on_remove(self, _cb):
+            return None
+
+        async def async_added_to_hass(self):
+            return None
+
+    button.async_on_remove = FakeEntity().async_on_remove
+    original_connect = button_module.async_dispatcher_connect
+    original_track = button_module.async_track_state_change_event
+    button_module.async_dispatcher_connect = FakeDispatcher.connect
+    button_module.async_track_state_change_event = FakeTrack()
+    try:
+        asyncio.run(button.async_added_to_hass())
+    finally:
+        button_module.async_dispatcher_connect = original_connect
+        button_module.async_track_state_change_event = original_track
+
+    assert connections, "button must subscribe to coordinator updates"
+    assert connections[0][0] == coordinator.signal
+    assert tracked and tracked[0] == ["todo.synthetic_source"]
+
+
+def test_button_state_write_does_not_raise() -> None:
+    coordinator = Coordinator()
+    button = RefreshRouteButton(entry(), coordinator)
+    written: list[bool] = []
+    button.async_write_ha_state = lambda: written.append(True)
+
+    button._handle_update()
+    button._handle_dependency_state(None)
+
+    assert written == [True, True]
