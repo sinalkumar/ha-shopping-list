@@ -825,3 +825,45 @@ def test_manifest_keys_are_sorted_for_hassfest() -> None:
 
     assert keys[:2] == ["domain", "name"]
     assert keys[2:] == sorted(keys[2:])
+
+
+def test_manifest_has_no_compiled_requirements() -> None:
+    """A compiled dependency must not be a hard requirement.
+
+    On Home Assistant OS (Alpine/musl) no manylinux wheel matches, so pip builds
+    from source, fails, and Home Assistant then refuses to load the whole
+    integration: the route and classification stop working because an optional
+    history feature could not install.
+    """
+
+    import json
+    from pathlib import Path
+
+    manifest = json.loads(
+        (
+            Path(__file__).parents[1]
+            / "custom_components"
+            / "smart_shopping_route"
+            / "manifest.json"
+        ).read_text()
+    )
+
+    assert "requirements" not in manifest
+
+
+def test_history_is_optional_without_duckdb(monkeypatch) -> None:
+    """Without the reader, every other feature must still work."""
+
+    import smart_shopping_route.price_coordinator as price_coordinator
+
+    monkeypatch.setattr(GrocerData, "duckdb_available", staticmethod(lambda: False))
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(),
+        _entry({"grocer_store_id": 228}),
+        summaries=lambda: ["Milk"],
+    )
+
+    assert coordinator.history_enabled is False
+    # Syncing is a no-op rather than an error.
+    asyncio.run(coordinator.async_sync_grocer(force=True))
+    assert coordinator.as_diagnostics()["grocer_history"] is False

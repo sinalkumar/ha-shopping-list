@@ -16,8 +16,5 @@
   "loggers": [
     "custom_components.smart_shopping_route"
   ],
-  "requirements": [
-    "duckdb==1.5.6"
-  ],
-  "version": "0.6.0"
+  "version": "0.6.1"
 }
