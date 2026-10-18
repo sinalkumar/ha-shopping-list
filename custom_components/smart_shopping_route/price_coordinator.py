@@ -838,7 +838,9 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             for key, summary in first_summary.items()
             if (force or key not in self._snapshot.quotes)
             and (force or key not in self._snapshot.failed)
-            and now >= self._backoff_until.get(key, 0.0)
+            # A manual or interval refresh is the household asking now, so it
+            # must not be silently skipped because a miss is still backing off.
+            and (force or now >= self._backoff_until.get(key, 0.0))
         }
 
         if to_fetch:

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.4
+
+- Make a manual or interval refresh retry an item whose last search found no
+  match. The one-hour failure backoff used to swallow the request, so pressing
+  Refresh could silently skip the very row being looked at.
+
 ## 0.8.3
 
 - Keep the retailer's top 20 search candidates instead of 8. A qualifier

@@ -365,6 +365,38 @@ def test_failed_lookup_is_not_retried_immediately(monkeypatch) -> None:
     assert calls == ["Milk"]
 
 
+def test_a_manual_refresh_retries_a_missed_item(monkeypatch) -> None:
+    """A miss backs off for an hour, but a refresh is the household asking now.
+
+    Without this, pressing Refresh within that hour silently skipped the very
+    item the household was looking at, which read as the button doing nothing.
+    """
+
+    coordinator, calls = make_price_coordinator(monkeypatch, ["Milk"], {})
+
+    asyncio.run(coordinator._async_update_data())
+    assert calls == ["Milk"]
+    assert "milk" in coordinator._backoff_until
+
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+
+    assert calls == ["Milk", "Milk"]
+
+
+def test_a_missed_item_is_retried_on_the_next_interval(monkeypatch) -> None:
+    """The slow interval heals a miss once the retailer's catalogue changes."""
+
+    coordinator, calls = make_price_coordinator(monkeypatch, ["Milk"], {})
+
+    asyncio.run(coordinator._async_update_data())
+    coordinator._backoff_until.clear()  # the 12h interval has elapsed
+    coordinator._force_full = True
+    asyncio.run(coordinator._async_update_data())
+
+    assert calls == ["Milk", "Milk"]
+
+
 def test_totals_and_specials(monkeypatch) -> None:
     coordinator, _calls = make_price_coordinator(
         monkeypatch,
