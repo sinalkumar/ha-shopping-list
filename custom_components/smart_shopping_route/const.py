@@ -31,7 +31,7 @@ MAX_CACHE_ENTRIES = 2000
 # Prices refresh slowly and politely; the route never waits for them. Each
 # interval re-prices the whole list, so this is also the retailer request rate:
 # every cycle is one lookup per distinct item.
-PRICE_REFRESH_HOURS = 3
+PRICE_REFRESH_HOURS = 6
 # How long a quote stays usable for display. Deliberately longer than the
 # interval: one missed or failed cycle must not relabel the whole basket as
 # STALE, which is what tying this to PRICE_REFRESH_HOURS would do.

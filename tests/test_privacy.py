@@ -10,6 +10,10 @@ import smart_shopping_route.coordinator as coordinator_module
 import smart_shopping_route.diagnostics as diagnostics_module
 import smart_shopping_route.storage as storage_module
 from smart_shopping_route import classifier
+from smart_shopping_route.const import (
+    PRICE_REFRESH_HOURS,
+    PRICE_STALE_AFTER_HOURS,
+)
 from smart_shopping_route.diagnostics import async_get_config_entry_diagnostics
 from smart_shopping_route.models import RouteSection
 
@@ -100,8 +104,8 @@ class FakePriceCoordinator:
             "items_with_history": 0,
             "grocer_history": False,
             "grocer_mirror_bytes": 0,
-            "refresh_hours": 3,
-            "stale_after_hours": 24,
+            "refresh_hours": PRICE_REFRESH_HOURS,
+            "stale_after_hours": PRICE_STALE_AFTER_HOURS,
             "weekly_refresh": {"weekday": 0, "hour": 6, "scheduled": False},
         }
 

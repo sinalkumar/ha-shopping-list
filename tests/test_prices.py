@@ -467,8 +467,8 @@ def test_price_diagnostics_expose_counts_only(monkeypatch) -> None:
         "stale_after_hours",
         "weekly_refresh",
     }
-    assert payload["refresh_hours"] == 3
-    assert payload["stale_after_hours"] == 24
+    assert payload["refresh_hours"] == PRICE_REFRESH_HOURS
+    assert payload["stale_after_hours"] == PRICE_STALE_AFTER_HOURS
     assert payload["weekly_refresh"] == {
         "weekday": 0,
         "hour": 6,

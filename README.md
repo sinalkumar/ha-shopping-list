@@ -151,7 +151,7 @@ Two sensors are added:
 - **Specials**: retailer-reference specials and recent same-product price drops,
   with item details in attributes. Stale observations do not claim current savings.
 
-Prices refresh every 3 hours on their own schedule, which re-prices the whole list: one lookup per distinct item per cycle, so a 13-item list is 13 requests every 3 hours. Adding one item does not trigger that, because a known quote is reused until the next cycle. Pricing never blocks the route: a slow or failing retailer leaves the list working, and a failed lookup backs off instead of retrying every cycle.
+Prices refresh every 6 hours on their own schedule, which re-prices the whole list: one lookup per distinct item per cycle, so a 13-item list is 13 requests every 6 hours. Adding one item does not trigger that, because a known quote is reused until the next cycle. Pricing never blocks the route: a slow or failing retailer leaves the list working, and a failed lookup backs off instead of retrying every cycle.
 
 A quote stays presentable for 24 hours, which is deliberately longer than the refresh interval: a single missed or failed cycle leaves the prices on screen instead of relabelling the whole basket as stale.
 

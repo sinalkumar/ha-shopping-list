@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.7
+
+- Re-price every 6 hours rather than every 3, halving the retailer requests
+  (one lookup per distinct item per cycle). Staleness stays decoupled from the
+  interval, so this is only about request rate.
+
 ## 0.8.6
 
 - Re-price the list every 3 hours instead of every 12. Each chain publishes
