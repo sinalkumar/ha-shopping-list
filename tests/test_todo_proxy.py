@@ -1,6 +1,7 @@
 """Route Todo entity: prefix gating, feature masking, and device grouping."""
 
 import asyncio
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
@@ -230,7 +231,12 @@ def test_price_is_rendered_with_size_and_unit_price() -> None:
     )
     # The generated block is marked, but carries no visible label: a prefix
     # repeated on every row wrapped the native list onto an extra line.
-    assert descriptions[0].startswith("<!-- ssr-price:start -->\n$8.50 · was $9.70")
+    assert descriptions[0].startswith("<!-- ssr-price:start sha256=")
+    assert "\n$8.50 · was $9.70 · 500g" in descriptions[0]
+    # Three lines, and a short digest: the block stays compact in the plain-text
+    # editor where Home Assistant shows the comments.
+    assert len(descriptions[0].splitlines()[:3]) == 3
+    assert descriptions[0].splitlines()[2] == "<!-- ssr-price:end -->"
     assert "automatic" not in descriptions[0]
     assert "edit notes" not in descriptions[0]
 
@@ -312,7 +318,7 @@ def test_a_searched_item_without_a_match_says_so() -> None:
     entity, coordinator = make_entity()
     coordinator.prices = FakePrices(failed={"milk"})
     displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
-    assert displayed.description.startswith("<!-- ssr-price:start -->\n")
+    assert displayed.description.startswith("<!-- ssr-price:start sha256=")
     assert "no price match — refresh, rename or pin this item" in displayed.description
 
 
@@ -382,3 +388,65 @@ def test_create_preserves_supported_notes() -> None:
         entity.async_create_todo_item(TodoItem(summary="Milk", description="Real note"))
     )
     assert coordinator.source.created[0].description == "Real note"
+
+
+def test_a_price_block_edit_is_still_rejected() -> None:
+    """The block is machine-checkable, so a hand edit is refused, not saved."""
+
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features |= int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+    coordinator.prices = FakePrices({"Milk": PriceQuote("paknsave", "1", "Milk", 4)})
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+    displayed.description = displayed.description.replace("$4.00", "$0.01")
+    with pytest.raises(ServiceValidationError, match="read-only"):
+        asyncio.run(entity.async_update_todo_item(displayed))
+    assert not coordinator.source.updated
+
+
+def test_a_legacy_four_line_block_still_saves() -> None:
+    """An item left open in a 0.8.7 dialog must not fail after the upgrade."""
+
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features |= int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+    coordinator.prices = FakePrices({"Milk": PriceQuote("paknsave", "1", "Milk", 4)})
+    price = "$4.00 · Milk"
+    digest = sha256(price.encode()).hexdigest()
+    legacy = (
+        f"<!-- ssr-price:start -->\n{price}\n"
+        f"<!-- ssr-price:sha256={digest} -->\n"
+        "<!-- ssr-price:end -->\n\nKeep chilled"
+    )
+    asyncio.run(
+        entity.async_update_todo_item(
+            TodoItem(
+                uid="uid-1",
+                summary="Milk",
+                description=legacy,
+                status=TodoItemStatus.NEEDS_ACTION,
+            )
+        )
+    )
+    assert coordinator.source.updated[0].description == "Keep chilled"
+
+
+def test_a_legacy_block_with_an_edited_price_is_rejected() -> None:
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features |= int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+    legacy = (
+        "<!-- ssr-price:start -->\n$0.01 · Milk\n"
+        f"<!-- ssr-price:sha256={sha256('$4.00 · Milk'.encode()).hexdigest()} -->\n"
+        "<!-- ssr-price:end -->"
+    )
+    with pytest.raises(ServiceValidationError, match="read-only"):
+        asyncio.run(
+            entity.async_update_todo_item(
+                TodoItem(uid="uid-1", summary="Milk", description=legacy)
+            )
+        )
+    assert not coordinator.source.updated

@@ -13,15 +13,21 @@ CONF_SHOW_COMPLETED = "show_completed"
 CONF_DISPLAY_SECTION_PREFIX = "display_section_prefix"
 CONF_PRICE_CHAIN = "price_chain"
 CONF_PRICE_STORE_ID = "price_store_id"
+# Display names are derived from the ids at setup time, but they are stored so a
+# card can label its own quote without re-resolving the retailer's store list.
+CONF_PRICE_STORE_NAME = "price_store_name"
+CONF_GROCER_STORE_NAME = "grocer_store_name"
 
 DEFAULT_SHOW_COMPLETED = False
 DEFAULT_DISPLAY_SECTION_PREFIX = False
 DEFAULT_PRICE_CHAIN = "none"
 FALLBACK_SECTION = "Unclassified / Other"
+# Woolworths prices are online-only, so there is no store to name.
+PRICE_STORE_NAME_WOOLWORTHS_ONLINE = "Woolworths online (not store-specific)"
 
 # Config entry data schema version. Bump together with config_flow.VERSION and
 # add a migration branch in async_migrate_entry.
-CONFIG_ENTRY_VERSION = 1
+CONFIG_ENTRY_VERSION = 2
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}.cache"
 PRICE_STORAGE_KEY_PREFIX = f"{DOMAIN}.prices"
@@ -47,6 +53,11 @@ PRICE_CONCURRENCY = 3
 PRICE_FAILURE_BACKOFF_SECONDS = 3600
 # Price history is persisted, so it must be bounded like the classification cache.
 PRICE_HISTORY_MAX = 500
+# Hex characters of the price-block digest kept in the rendered description. The
+# block is derived, never stored, so this only has to catch a hand edit; 16 hex
+# characters still keep the opening comment on one line in Home Assistant's own
+# plain-text editor.
+PRICE_BLOCK_DIGEST_CHARS = 16
 # Observations kept per item. Changes are always recorded; unchanged readings are
 # sampled so a long-running profile keeps a usable series without growing.
 PRICE_HISTORY_MAX_POINTS = 60

@@ -12,15 +12,36 @@ from homeassistant.helpers import entity_registry as er
 
 from .const import (
     CONF_DISPLAY_SECTION_PREFIX,
+    CONF_PRICE_STORE_NAME,
     CONF_SHOW_COMPLETED,
     DEFAULT_DISPLAY_SECTION_PREFIX,
     DEFAULT_SHOW_COMPLETED,
     DOMAIN,
+    PRICE_STORE_NAME_WOOLWORTHS_ONLINE,
 )
 from .models import normalize_summary, sort_items
+from .prices import CHAIN_WOOLWORTHS
 from .stores import HISTORY_STORES
 
 CARD_URL = "/smart_shopping_route/route-card.js"
+
+
+def _price_store_label(coordinator: Any, prices: Any) -> str:
+    """Name the store a quote came from, without asking the retailer again.
+
+    Entries written before the names were stored still carry the ids, and a
+    Pak'nSave profile is only accepted when both ids are the same store, so the
+    history name is a faithful fallback rather than a guess.
+    """
+
+    name = coordinator.entry.data.get(CONF_PRICE_STORE_NAME)
+    if name:
+        return str(name)
+    if prices.chain == CHAIN_WOOLWORTHS:
+        return PRICE_STORE_NAME_WOOLWORTHS_ONLINE
+    return (
+        HISTORY_STORES.get(prices.grocer_store_id, ("", ""))[1] or "Current-price store"
+    )
 
 
 def route_payload(coordinator: Any, *, can_control: bool) -> dict[str, Any]:
@@ -85,18 +106,11 @@ def route_payload(coordinator: Any, *, can_control: bool) -> dict[str, Any]:
         "source_features": int(coordinator.source.supported_features),
         "sections": [section.name for section in coordinator.sections],
         "prices_enabled": prices.enabled,
-        "price_store": coordinator.entry.data.get("price_store_name")
-        or (
-            "Woolworths online (not store-specific)"
-            if prices.chain == "woolworths"
-            else "Current-price store"
-        ),
+        "price_store": _price_store_label(coordinator, prices),
         "history_store": HISTORY_STORES.get(prices.grocer_store_id, ("", ""))[1],
         "quality": prices.status_attributes(),
         "total": snapshot.total,
-        "legacy_history_preserved": any(
-            identity.startswith("legacy:") for identity in prices._history_archive
-        ),
+        "legacy_history_preserved": prices.legacy_history_preserved,
         "items": rows,
     }
 

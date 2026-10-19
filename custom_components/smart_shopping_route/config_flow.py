@@ -17,8 +17,10 @@ from .const import (
     CONF_AI_TASK_ENTITY_ID,
     CONF_DISPLAY_SECTION_PREFIX,
     CONF_GROCER_STORE_ID,
+    CONF_GROCER_STORE_NAME,
     CONF_PRICE_CHAIN,
     CONF_PRICE_STORE_ID,
+    CONF_PRICE_STORE_NAME,
     CONF_PROFILE_NAME,
     CONF_SECTIONS,
     CONF_SHOW_COMPLETED,
@@ -28,6 +30,7 @@ from .const import (
     DEFAULT_PRICE_CHAIN,
     DEFAULT_SHOW_COMPLETED,
     DOMAIN,
+    PRICE_STORE_NAME_WOOLWORTHS_ONLINE,
 )
 from .models import (
     RouteParseError,
@@ -114,10 +117,10 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_PROFILE_NAME: name,
                     CONF_PRICE_STORE_ID: price_store_id,
                     CONF_GROCER_STORE_ID: grocer_store_id,
-                    "price_store_name": self._resolved_store_name,
-                    "grocer_store_name": HISTORY_STORES.get(grocer_store_id, ("", ""))[
-                        1
-                    ],
+                    CONF_PRICE_STORE_NAME: self._resolved_store_name,
+                    CONF_GROCER_STORE_NAME: HISTORY_STORES.get(
+                        grocer_store_id, ("", "")
+                    )[1],
                     CONF_SECTIONS: [
                         {"name": section.name, "hints": section.hints}
                         for section in sections
@@ -258,9 +261,7 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         chain = user_input.get(CONF_PRICE_CHAIN, DEFAULT_PRICE_CHAIN)
         store = str(user_input.get(CONF_PRICE_STORE_ID) or "").strip()
         self._resolved_store_name = (
-            "Woolworths online (not store-specific)"
-            if chain == CHAIN_WOOLWORTHS
-            else ""
+            PRICE_STORE_NAME_WOOLWORTHS_ONLINE if chain == CHAIN_WOOLWORTHS else ""
         )
         if chain != CHAIN_PAKNSAVE:
             return ""

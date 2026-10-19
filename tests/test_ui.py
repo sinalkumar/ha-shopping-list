@@ -173,3 +173,38 @@ def test_stale_prices_do_not_claim_current_savings(monkeypatch):
     assert payload["items"][0]["stale"]
     assert coordinator.prices.snapshot.savings == 0
     assert coordinator.prices.snapshot.specials == []
+
+
+def test_a_profile_without_a_stored_name_still_names_its_store(monkeypatch) -> None:
+    """Entries written before 0.8.8 stored only the ids, not the labels."""
+
+    coordinator = route(monkeypatch)
+    coordinator.entry.data.pop("price_store_name")
+    coordinator.prices.grocer_store_id = 228
+
+    payload = ui.route_payload(coordinator, can_control=True)
+
+    # Both ids name the same physical store, so the history name is faithful.
+    assert payload["price_store"] == payload["history_store"]
+    assert payload["price_store"] == "PAK'nSAVE Ormiston"
+    assert "Current-price store" not in payload["price_store"]
+
+
+def test_woolworths_without_a_stored_name_uses_the_online_label(monkeypatch) -> None:
+    coordinator = route(monkeypatch)
+    coordinator.entry.data.pop("price_store_name")
+    coordinator.prices.chain = "woolworths"
+
+    payload = ui.route_payload(coordinator, can_control=True)
+
+    assert payload["price_store"] == "Woolworths online (not store-specific)"
+
+
+def test_an_unnamed_store_falls_back_to_a_neutral_label(monkeypatch) -> None:
+    coordinator = route(monkeypatch)
+    coordinator.entry.data.pop("price_store_name")
+    coordinator.prices.grocer_store_id = None
+
+    payload = ui.route_payload(coordinator, can_control=True)
+
+    assert payload["price_store"] == "Current-price store"

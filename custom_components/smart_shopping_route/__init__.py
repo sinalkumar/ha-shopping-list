@@ -7,7 +7,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import (
     ConfigEntryNotReady,
     HomeAssistantError,
@@ -28,9 +28,14 @@ from .const import (
     ATTR_QUERY,
     ATTR_REMEMBER,
     ATTR_SECTION,
+    CONF_GROCER_STORE_ID,
+    CONF_GROCER_STORE_NAME,
+    CONF_PRICE_CHAIN,
+    CONF_PRICE_STORE_NAME,
     CONFIG_ENTRY_VERSION,
     DOMAIN,
     PLATFORMS,
+    PRICE_STORE_NAME_WOOLWORTHS_ONLINE,
     SERVICE_CLEAR_CACHE,
     SERVICE_FORGET_ITEM_SECTION,
     SERVICE_PIN_ITEM_PRODUCT,
@@ -41,7 +46,9 @@ from .const import (
 )
 from .coordinator import RouteCoordinator
 from .models import section_names
+from .prices import CHAIN_WOOLWORTHS
 from .storage import PriceStore, async_pop_store
+from .stores import HISTORY_STORES
 
 
 async def async_setup(hass: HomeAssistant, _config: dict[str, Any]) -> bool:
@@ -112,7 +119,31 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.version > CONFIG_ENTRY_VERSION:
         # Downgrade: refuse rather than run on data we cannot interpret.
         return False
+    if entry.version < 2:
+        _backfill_store_names(hass, entry)
     return True
+
+
+@callback
+def _backfill_store_names(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Add the store display names profiles stored before 0.8.8 kept.
+
+    Both names are derived from ids the entry already holds, so this never
+    touches the network. A Pak'nSave profile is only accepted when its
+    history store and current-price store resolve to the same physical
+    store, so the history name is also the price-store name.
+    """
+
+    data = dict(getattr(entry, "data", None) or {})
+    grocer_id = data.get(CONF_GROCER_STORE_ID)
+    if grocer_id is not None and not data.get(CONF_GROCER_STORE_NAME):
+        data[CONF_GROCER_STORE_NAME] = HISTORY_STORES.get(grocer_id, ("", ""))[1]
+    if not data.get(CONF_PRICE_STORE_NAME):
+        if data.get(CONF_PRICE_CHAIN) == CHAIN_WOOLWORTHS:
+            data[CONF_PRICE_STORE_NAME] = PRICE_STORE_NAME_WOOLWORTHS_ONLINE
+        elif grocer_id is not None:
+            data[CONF_PRICE_STORE_NAME] = HISTORY_STORES.get(grocer_id, ("", ""))[1]
+    hass.config_entries.async_update_entry(entry, data=data, version=2)
 
 
 def _route_entity_ids(hass: HomeAssistant, call: ServiceCall) -> set[str]:

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.8
+
+- Name the store a quote came from. Profiles written before the names were
+  stored only kept the ids, so the card labelled its own header
+  "Current-price store" even though it knew the store. A migration now
+  backfills both names from ids the entry already holds, and the card falls
+  back to the same derivation for any entry that still lacks them.
+- Keep the price block to three lines with a short digest. Home Assistant's own
+  item editor shows the machine-readable block as plain text, and the old
+  four-line form with a full 64-character digest wrapped onto extra lines. Both
+  forms are still accepted on save, so an item left open in an older dialog
+  does not fail after the upgrade.
+- Say "no price match — refresh, rename or pin this item" on the card, matching
+  the native list instead of the vaguer "waiting for a confident match".
+- Stop the shopping card from reading the coordinator's private history
+  archive; the condition is now a named property.
+- Drop the stale `?v=0.8.0` from the documented card resource URL. The file is
+  served without long-lived cache headers, so the suffix only invited
+  hand-editing on every release.
+
 ## 0.8.7
 
 - Re-price every 6 hours rather than every 3, halving the retailer requests

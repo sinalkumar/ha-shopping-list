@@ -225,3 +225,12 @@ test("background price refresh does not erase unsaved notes", async (t) => {
   data.items[0].price.price = 3.5; await card._load();
   assert.equal(field(card._dialog, "Notes").value, "Unsaved text");
 });
+
+test("an unmatched row explains itself the same way the native list does", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.items[0].price = null; data.items[0].stale = false;
+  data.quality.unmatched_items = 1; data.quality.priced_items = 0;
+  await card._load();
+  assert.match(card.shadowRoot.textContent, /no price match — refresh, rename or pin this item/);
+  assert.doesNotMatch(card.shadowRoot.textContent, /Unpriced/);
+});

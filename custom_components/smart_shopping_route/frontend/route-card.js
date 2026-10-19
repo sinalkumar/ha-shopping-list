@@ -192,7 +192,7 @@ class SmartShoppingRouteCard extends HTMLElement {
           }
         }
         body.append(details);
-      } else if (data.prices_enabled && !item.completed) body.append(node("div", "Unpriced — waiting for a confident match", "muted"));
+      } else if (data.prices_enabled && !item.completed) body.append(node("div", "no price match — refresh, rename or pin this item", "muted"));
       if (item.notes) body.append(node("div", item.notes, "notes"));
       row.append(check, body);
       if (this._can(4)) {

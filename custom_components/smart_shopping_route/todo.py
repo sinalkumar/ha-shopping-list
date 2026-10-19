@@ -22,6 +22,7 @@ from .const import (
     CONF_PROFILE_NAME,
     CONF_SHOW_COMPLETED,
     DOMAIN,
+    PRICE_BLOCK_DIGEST_CHARS,
 )
 from .coordinator import RouteCoordinator
 from .device import route_device_info
@@ -32,6 +33,26 @@ from .models import (
     sort_items,
     strip_display_prefix,
 )
+
+# Blocks rendered by 0.8.7 and earlier carried a full digest on its own line.
+# Both forms are still recognised so an item open in a stale dialog saves.
+_PRICE_BLOCK_PREFIXES = ("<!-- ssr-price:start -->\n", "<!-- ssr-price:start sha256=")
+
+
+def _price_block_intact(block: str) -> bool:
+    """True when a rendered price block still matches its own digest."""
+
+    header, _, body = block.partition("\n")
+    if header == "<!-- ssr-price:start -->":
+        generated, hash_sep, digest = body.rpartition("\n<!-- ssr-price:sha256=")
+        return (
+            bool(hash_sep) and digest == f"{sha256(generated.encode()).hexdigest()} -->"
+        )
+    prefix = "<!-- ssr-price:start sha256="
+    if not (header.startswith(prefix) and header.endswith(" -->")):
+        return False
+    digest = header.removeprefix(prefix).removesuffix(" -->")
+    return digest == sha256(body.encode()).hexdigest()[:PRICE_BLOCK_DIGEST_CHARS]
 
 
 async def async_setup_entry(
@@ -110,13 +131,15 @@ class SmartShoppingRouteTodo(TodoListEntity):
                 # No visible label: the price line describes itself, and a
                 # 45-character prefix wrapped every row onto an extra line in
                 # the native list. The HTML comments keep the block
-                # machine-checkable and invisible, and edits to the price are
-                # still rejected with an explanation of what to change.
-                checksum = sha256(price.encode()).hexdigest()
+                # machine-checkable and invisible in the list, and edits to the
+                # price are still rejected with an explanation of what to
+                # change. The digest rides in the opening comment and is kept
+                # short so the block stays three lines in Home Assistant's own
+                # plain-text editor, where the comments are visible.
+                checksum = sha256(price.encode()).hexdigest()[:PRICE_BLOCK_DIGEST_CHARS]
                 item.description = (
-                    f"<!-- ssr-price:start -->\n{price}\n"
-                    f"<!-- ssr-price:sha256={checksum} -->\n"
-                    f"<!-- ssr-price:end -->"
+                    f"<!-- ssr-price:start sha256={checksum} -->\n{price}\n"
+                    "<!-- ssr-price:end -->"
                     + (
                         f"\n\n{source_item.description}"
                         if source_item.description is not None
@@ -223,20 +246,14 @@ class SmartShoppingRouteTodo(TodoListEntity):
         )
         # A genuine source note is never interpreted as generated metadata.
         if description != (source.description if source else None):
-            if description and description.startswith("<!-- ssr-price:start -->\n"):
+            if description and description.startswith(_PRICE_BLOCK_PREFIXES):
                 block, sep, notes = description.partition("\n<!-- ssr-price:end -->")
                 if not sep:
                     raise ServiceValidationError(
                         "Automatic price information was changed. Reopen the item "
                         "and edit only the notes below it."
                     )
-                generated, hash_sep, checksum = block.removeprefix(
-                    "<!-- ssr-price:start -->\n"
-                ).rpartition("\n<!-- ssr-price:sha256=")
-                if (
-                    not hash_sep
-                    or checksum != f"{sha256(generated.encode()).hexdigest()} -->"
-                ):
+                if not _price_block_intact(block):
                     raise ServiceValidationError(
                         "Automatic price information is read-only. Reopen the item and edit notes below it, or use product pinning."
                     )

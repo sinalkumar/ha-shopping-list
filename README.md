@@ -78,7 +78,9 @@ For clearer prices and corrections without copying UIDs, add the optional card:
 
 1. After updating and restarting, open **Settings → Dashboards → Resources**
    (enable Advanced Mode in your profile if Resources is hidden).
-2. Add `/smart_shopping_route/route-card.js?v=0.8.0` as a **JavaScript module**.
+2. Add `/smart_shopping_route/route-card.js` as a **JavaScript module**. The
+   file is served without long-lived cache headers, so no `?v=` suffix is
+   needed after an upgrade.
 3. Add a manual dashboard card:
 
 ```yaml

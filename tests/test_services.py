@@ -639,3 +639,82 @@ def test_pin_service_leaves_notification_to_the_price_coordinator(hass) -> None:
     )
 
     assert notifications == []
+
+
+def _migrating_hass() -> SimpleNamespace:
+    """A config-entry manager that records the migrated payload."""
+
+    written: dict[str, object] = {}
+
+    def async_update_entry(entry, **kwargs):
+        written.update(kwargs)
+        entry.data = kwargs.get("data", entry.data)
+        entry.version = kwargs.get("version", entry.version)
+
+    return SimpleNamespace(
+        config_entries=SimpleNamespace(async_update_entry=async_update_entry),
+        written=written,
+    )
+
+
+def test_migration_backfills_a_paknsave_store_name() -> None:
+    """0.8.7 stored only the ids, so the card labelled the store generically."""
+
+    hass = _migrating_hass()
+    entry = SimpleNamespace(
+        version=1,
+        data={
+            "price_chain": "paknsave",
+            "price_store_id": "228",
+            "grocer_store_id": 228,
+        },
+    )
+
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
+
+    assert entry.version == 2
+    assert entry.data["price_store_name"] == "PAK'nSAVE Ormiston"
+    assert entry.data["grocer_store_name"] == "PAK'nSAVE Ormiston"
+    # Ids survive the migration untouched.
+    assert entry.data["price_store_id"] == "228"
+    assert entry.data["grocer_store_id"] == 228
+
+
+def test_migration_backfills_the_woolworths_online_label() -> None:
+    hass = _migrating_hass()
+    entry = SimpleNamespace(
+        version=1,
+        data={"price_chain": "woolworths", "grocer_store_id": 85},
+    )
+
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
+
+    assert entry.data["price_store_name"] == "Woolworths online (not store-specific)"
+    assert entry.data["grocer_store_name"] == "Woolworths Manukau City Mall"
+
+
+def test_migration_leaves_a_pricing_disabled_profile_alone() -> None:
+    hass = _migrating_hass()
+    entry = SimpleNamespace(version=1, data={"price_chain": "none"})
+
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
+
+    assert entry.version == 2
+    assert "price_store_name" not in entry.data
+
+
+def test_migration_does_not_overwrite_a_stored_name() -> None:
+    hass = _migrating_hass()
+    entry = SimpleNamespace(
+        version=1,
+        data={
+            "price_chain": "paknsave",
+            "price_store_id": "228",
+            "grocer_store_id": 228,
+            "price_store_name": "My local Pak'nSave",
+        },
+    )
+
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
+
+    assert entry.data["price_store_name"] == "My local Pak'nSave"

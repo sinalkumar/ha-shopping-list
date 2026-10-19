@@ -1079,6 +1079,12 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "last_update_success": self.last_update_success,
         }
 
+    @property
+    def legacy_history_preserved(self) -> bool:
+        """True while an unidentified series is held back from comparisons."""
+
+        return any(identity.startswith("legacy:") for identity in self._history_archive)
+
     def as_diagnostics(self) -> dict[str, Any]:
         """Return counts only; product names and item text stay out of diagnostics."""
 
