@@ -6,6 +6,7 @@ a subscription taken once at setup kept reporting the removed entity's items
 while the route still looked available.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -159,3 +160,85 @@ def test_unsubscribe_stops_the_entity_and_state_listeners(hass) -> None:
     assert hass.bus.listeners == []
     entity.async_update_listeners()
     assert seen == []
+
+
+def test_a_second_subscribe_replaces_rather_than_stacks(hass) -> None:
+    entity = FakeEntity(["Milk"])
+    hass.current["entity"] = entity
+    adapter = SourceTodoAdapter(hass, ENTITY)
+    seen: list[list[TodoItem]] = []
+
+    first = adapter.subscribe(seen.append)
+    second = adapter.subscribe(seen.append)
+
+    assert len(entity._update_listeners) == 1
+    entity.async_update_listeners()
+    assert len(seen) == 1, "one entity change must notify the route once"
+    second()
+    first()
+    assert entity._update_listeners == []
+
+
+def test_a_failed_setup_does_not_leave_a_source_listener_behind() -> None:
+    """Home Assistant retries a failed setup, so the error path must clean up.
+
+    ``RouteCoordinator.async_setup`` subscribes before anything that can fail
+    later (a price store that will not load, say). Without a shutdown on the
+    error path the retry binds a second listener, and every source change then
+    runs classification and price lookups twice.
+    """
+
+    import tempfile
+    from types import SimpleNamespace
+
+    from homeassistant.config_entries import ConfigEntryNotReady
+    from homeassistant.core import HomeAssistant
+    from homeassistant.exceptions import HomeAssistantError
+
+    import smart_shopping_route as integration
+    from smart_shopping_route.coordinator import RouteCoordinator
+
+    entity = FakeEntity(["Milk"])
+
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            hass = HomeAssistant(directory)
+            hass.data[DATA_COMPONENT] = SimpleNamespace(get_entity=lambda _id: entity)
+            hass.states.async_set(ENTITY, "1")
+            hass.config_entries = SimpleNamespace(
+                async_forward_entry_setups=lambda *a, **k: asyncio.sleep(0),
+                async_unload_platforms=lambda *a, **k: asyncio.sleep(0, result=True),
+            )
+            entry = SimpleNamespace(
+                entry_id="failed-entry",
+                data={
+                    "sections": [{"name": "Dairy", "description": "milk"}],
+                    "source_entity_id": ENTITY,
+                    "ai_task_entity_id": "ai_task.example",
+                },
+                options={},
+                title="Fails after subscribe",
+                async_on_unload=lambda _cb: None,
+                async_create_background_task=(
+                    lambda hass, coro, name=None: hass.async_create_task(coro)
+                ),
+            )
+
+            original = RouteCoordinator.async_setup
+
+            async def fail_after_subscribe(self) -> None:
+                self._unsubscribe = self.source.subscribe(self._source_updated)
+                raise HomeAssistantError("price store will not load")
+
+            RouteCoordinator.async_setup = fail_after_subscribe
+            try:
+                with pytest.raises(ConfigEntryNotReady):
+                    await integration.async_setup_entry(hass, entry)
+            finally:
+                RouteCoordinator.async_setup = original
+
+            assert entity._update_listeners in (None, []), (
+                "a failed setup must not leave the source subscribed"
+            )
+
+    asyncio.run(scenario())

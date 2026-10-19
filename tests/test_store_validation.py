@@ -55,3 +55,17 @@ def test_woolworths_online_scope_is_explicit(monkeypatch):
         )
     )
     assert "not store-specific" in flow.created["data"]["price_store_name"]
+
+
+def test_a_profile_without_a_history_store_saves_no_name(monkeypatch):
+    """No history store is a valid choice; the name must be empty, not missing."""
+
+    flow = make_flow(monkeypatch)
+    _with_stores(monkeypatch, STORES)
+    asyncio.run(
+        flow.async_step_user(
+            profile_input(price_chain="paknsave", price_store_id="Ormiston")
+        )
+    )
+    assert flow.created["data"]["grocer_store_id"] is None
+    assert flow.created["data"]["grocer_store_name"] == ""

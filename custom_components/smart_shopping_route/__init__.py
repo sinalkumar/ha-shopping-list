@@ -66,6 +66,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await coordinator.async_setup()
     except HomeAssistantError as err:
+        # async_setup subscribes to the source before it can fail later (a price
+        # store that will not load, say). Home Assistant retries this entry, so
+        # leaving the subscription behind would give one route two listeners and
+        # run every classification and price request twice.
+        await coordinator.async_shutdown()
         raise ConfigEntryNotReady("Source to-do entity is not ready") from err
     hass.data[DOMAIN][entry.entry_id] = coordinator
     try:

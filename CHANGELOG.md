@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.10
+
+- Release the source subscription when setup fails. `async_setup` subscribes to
+  the source before it can fail later (a price store that will not load, say),
+  and the error path raised `ConfigEntryNotReady` without shutting the
+  coordinator down. Home Assistant retries the entry, so one route ended up with
+  two listeners and ran classification and price lookups twice for every source
+  change. The retry path itself was already correct.
+- Stop the card contradicting itself when the source is unavailable. It warned
+  that the source list was unavailable and then also said the list was empty,
+  because an unavailable source reports no items. The empty message now appears
+  only when the source is actually available.
+- Resolve the configured history store's name through the shared `store_name()`
+  helper in the config flow too, so every store-name lookup degrades the same
+  way instead of the flow keeping its own raw dictionary lookup.
+
 ## 0.8.9
 
 - Follow the source to-do entity across a reload. A to-do integration can

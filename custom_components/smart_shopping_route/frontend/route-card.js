@@ -223,7 +223,9 @@ class SmartShoppingRouteCard extends HTMLElement {
       }
       card.append(row);
     }
-    if (!data.items.length) card.append(node("p", "Your shopping list is empty."));
+    // An unavailable source reports nothing, which is not the same as an empty
+    // list: saying "empty" there contradicts the warning above it.
+    if (!data.items.length && data.available) card.append(node("p", "Your shopping list is empty."));
     // Only remember expansions for rows that still exist, so a long session
     // cannot accumulate every item the household ever opened.
     const uids = new Set(data.items.map((item) => item.uid));

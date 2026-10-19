@@ -333,3 +333,18 @@ test("advanced product matching starts collapsed and opens when a pin exists", a
   button(card.shadowRoot, "Edit").click();
   assert.equal(card._dialog.querySelector("details.advanced").open, true);
 });
+
+test("an unavailable source does not also claim the list is empty", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.available = false; data.can_control = false; data.items = [];
+  await card._load();
+  assert.match(card.shadowRoot.textContent, /Source list unavailable/);
+  assert.doesNotMatch(card.shadowRoot.textContent, /shopping list is empty/);
+});
+
+test("a genuinely empty list still says so", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.items = [];
+  await card._load();
+  assert.match(card.shadowRoot.textContent, /shopping list is empty/);
+});

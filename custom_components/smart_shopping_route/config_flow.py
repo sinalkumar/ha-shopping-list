@@ -46,7 +46,7 @@ from .prices import (
     PriceError,
     async_list_paknsave_stores,
 )
-from .stores import HISTORY_STORES
+from .stores import HISTORY_STORES, store_name
 
 
 def _store_key(name: str) -> str:
@@ -118,9 +118,7 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_PRICE_STORE_ID: price_store_id,
                     CONF_GROCER_STORE_ID: grocer_store_id,
                     CONF_PRICE_STORE_NAME: self._resolved_store_name,
-                    CONF_GROCER_STORE_NAME: HISTORY_STORES.get(
-                        grocer_store_id, ("", "")
-                    )[1],
+                    CONF_GROCER_STORE_NAME: store_name(grocer_store_id),
                     CONF_SECTIONS: [
                         {"name": section.name, "hints": section.hints}
                         for section in sections
