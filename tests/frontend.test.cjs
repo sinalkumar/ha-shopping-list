@@ -116,7 +116,10 @@ test("product pins accept a grocer product URL and can be reset", async (t) => {
   const { card, calls, data } = fixture(t); await settle(card);
   button(card.shadowRoot, "Edit").click();
   field(card._dialog, "Product search").value = "Example oat milk 2L";
-  field(card._dialog, "Exact grocer.nz product ID or URL (optional)").value = "https://grocer.nz/product/123/example-product";
+  const historyField = field(card._dialog, "Exact grocer.nz product ID or URL (optional)");
+  // A digits-only keypad would make the URL half of this label untypeable.
+  assert.notEqual(historyField.inputMode, "numeric");
+  historyField.value = "https://grocer.nz/product/123/example-product";
   button(card._dialog, "Pin product").click(); await settle(card);
   assert.equal(calls[0].fields.grocer_product_id, 123);
   assert.equal(data.items[0].pin.query, "Example oat milk 2L");

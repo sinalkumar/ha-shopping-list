@@ -71,7 +71,7 @@ class FakePriceCoordinator:
     enabled = False
     chain = "none"
 
-    def __init__(self, _hass, _entry, *, summaries) -> None:
+    def __init__(self, _hass, _entry, *, summaries, **_kwargs) -> None:
         pass
 
     def async_set_update_callback(self, on_update) -> None:

@@ -50,7 +50,12 @@ class RouteCoordinator:
         self.source = SourceTodoAdapter(hass, entry.data[CONF_SOURCE_ENTITY_ID])
         self.classifier = AITaskClassifier(hass, entry.data[CONF_AI_TASK_ENTITY_ID])
         self.store = async_get_store(hass, entry.entry_id)
-        self.prices = PriceCoordinator(hass, entry, summaries=self._priced_summaries)
+        self.prices = PriceCoordinator(
+            hass,
+            entry,
+            summaries=self._priced_summaries,
+            authoritative=lambda: self.source.available,
+        )
         # Every completed price update must reach entities, including the ones
         # the interval performs: the interval bypasses this
         # coordinator's own notification path.
@@ -113,7 +118,11 @@ class RouteCoordinator:
         self.cache = await self.store.async_load()
         self.cache.invalidate_sections(set(section_names(self.sections)))
         self.items = self.source.items()
-        self.cache.prune_uids({item.uid for item in self.items if item.uid})
+        # A source that is still unavailable at startup reports no items, and
+        # pruning against that reading would drop every section correction and
+        # persist the loss. The first available reading prunes instead.
+        if self.source.available:
+            self.cache.prune_uids({item.uid for item in self.items if item.uid})
         self._unsubscribe = self.source.subscribe(self._source_updated)
         # Home Assistant stops without unloading entries, so a pending debounced
         # write needs its own final-write flush or the last classification is lost.
@@ -203,11 +212,14 @@ class RouteCoordinator:
 
     @callback
     def _source_updated(self, items: list[TodoItem]) -> None:
-        self.items = items
-        # An unavailable source can report an empty list, and pruning then would
-        # drop section corrections for items that still exist. Only a reading
-        # from an available source is authoritative.
-        if self.source.available and self.cache.prune_uids({
+        available = self.source.available
+        # An unavailable source can report an empty list, and adopting it would
+        # empty the derived list, drop section corrections and clear the price
+        # cache for items that still exist. Only an available reading is
+        # authoritative; until one arrives the last known items stand.
+        if available:
+            self.items = items
+        if available and self.cache.prune_uids({
             item.uid for item in items if item.uid
         }):
             self._schedule_save()
@@ -374,7 +386,8 @@ class RouteCoordinator:
     async def async_refresh(self) -> None:
         if self._closed:
             return
-        self.items = self.source.items()
+        if self.source.available:
+            self.items = self.source.items()
         self._reset_retries()
         self._notify()
         self.async_classify_unknown()

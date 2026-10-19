@@ -250,10 +250,15 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         entry: ConfigEntry,
         *,
         summaries: Any,
+        authoritative: Callable[[], bool] | None = None,
     ) -> None:
         self.entry = entry
         self.chain = entry.data.get(CONF_PRICE_CHAIN)
         self._summaries = summaries
+        # A source that is unavailable reports no items. That reading must never
+        # be read as "the list is empty", or one restart during an outage would
+        # drop every quote, store history and product match we paid to collect.
+        self._authoritative = authoritative or (lambda: True)
         self._client: PriceClient | None = None
         self._snapshot = PriceSnapshot()
         self._attempts: dict[str, int] = {}
@@ -888,7 +893,11 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 continue
             active[key] += 1
             first_summary.setdefault(key, summary)
-        self._snapshot.active = dict(active)
+        # An unavailable source is not an empty list: keep the previous counts so
+        # the basket keeps reporting what it knows instead of zero items.
+        authoritative = self._authoritative()
+        if authoritative:
+            self._snapshot.active = dict(active)
 
         force = self._force_full
         self._force_full = False
@@ -939,7 +948,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 transport_failures,
             )
 
-        self._prune()
+        if authoritative:
+            self._prune()
         return self._snapshot
 
     def _prune(self) -> None:

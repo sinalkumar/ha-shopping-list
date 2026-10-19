@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.12
+
+- Stop an unavailable source from emptying the route. The card and the price
+  cache already refused to read "unavailable" as "empty", but the coordinator
+  and the price coordinator still adopted the empty reading, so a restart or a
+  Refresh during an outage blanked the derived list, dropped every section
+  correction on the next save, and cleared the quotes, store history and product
+  matches the household had collected. The last known items now stand until an
+  available reading arrives, and only an available reading prunes.
+- Drop the numeric keypad hint from the editor's grocer.nz field. The label
+  offers an ID or a product URL, and a digits-only keypad on a phone made the
+  URL half of that impossible to type.
+
 ## 0.8.11
 
 - Keep an expanded "Product & history" section expanded when the source briefly

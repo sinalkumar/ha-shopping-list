@@ -289,7 +289,8 @@ class SmartShoppingRouteCard extends HTMLElement {
       const query = this._field("Product search", item.pin?.query || item.summary, "input", advanced);
       const product = this._field("Exact retailer product ID (optional)", item.pin?.product_id || "", "input", advanced);
       const history = this._field("Exact grocer.nz product ID or URL (optional)", item.pin?.grocer_product_id || "", "input", advanced);
-      history.inputMode = "numeric";
+      // No numeric keypad hint: the field takes an ID or a grocer.nz URL, and
+      // a digits-only keypad would make the URL the label offers untypeable.
       advanced.append(this._button("Pin product", async () => {
         const historyMatch = history.value.trim().match(/^(?:https:\/\/grocer\.nz\/product\/)?([1-9]\d*)(?:\/[^\s]*)?$/);
         if (history.value.trim() && !historyMatch) { this._dialogError.textContent = "Enter a positive history product ID or a grocer.nz product URL."; return; }

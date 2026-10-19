@@ -1995,3 +1995,44 @@ def test_a_readded_item_imports_its_store_history_again(monkeypatch) -> None:
     assert coordinator.snapshot.store_history["milk"], (
         "a re-added item must import its store history again"
     )
+
+
+def test_an_unavailable_source_does_not_clear_the_price_cache(monkeypatch) -> None:
+    """A restart or refresh during an outage must keep the prices we collected.
+
+    The source reports no items while it is unavailable, and pruning against
+    that reading used to drop every quote, store history and product match.
+    """
+
+    summaries = ["Milk"]
+    available = {"value": True}
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(),
+        fake_entry(),
+        summaries=lambda: list(summaries),
+        authoritative=lambda: available["value"],
+    )
+
+    class Client:
+        async def async_lookup(self, summary, pin=None):
+            return quote("Milk", 4.0) if summary == "Milk" else None
+
+    coordinator._client = Client()
+
+    first = asyncio.run(coordinator._async_update_data())
+    assert set(first.quotes) == {"milk"}
+
+    available["value"] = False
+    summaries.clear()
+    during = asyncio.run(coordinator._async_update_data())
+
+    assert set(during.quotes) == {"milk"}
+    assert during.active == {"milk": 1}
+    assert during.priced_count == 1
+
+    # Recovery prunes normally: the reading is authoritative again.
+    available["value"] = True
+    recovered = asyncio.run(coordinator._async_update_data())
+
+    assert recovered.quotes == {}
+    assert recovered.active == {}

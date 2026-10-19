@@ -65,7 +65,7 @@ class FakePriceCoordinator:
     enabled = False
     chain = "none"
 
-    def __init__(self, _hass, _entry, *, summaries) -> None:
+    def __init__(self, _hass, _entry, *, summaries, **_kwargs) -> None:
         self._summaries = summaries
 
     async def async_load(self) -> None:
@@ -678,11 +678,16 @@ def test_an_unavailable_source_keeps_pricing_backoff(monkeypatch) -> None:
     """
 
     coordinator = make_coordinator([item("uid-1", "Milk")], monkeypatch)
+    # Pre-classified, so no AI run can clear the bookkeeping on its own.
+    coordinator.cache.set("Milk", "Dairy")
     coordinator._attempts["milk"] = 2
     coordinator._retry_after["milk"] = 999.0
     coordinator.source.available = False
 
-    coordinator._source_updated([])
+    async def run() -> None:
+        coordinator._source_updated([])
+
+    asyncio.run(run())
 
     assert coordinator._attempts == {"milk": 2}
     assert coordinator._retry_after == {"milk": 999.0}
@@ -697,3 +702,77 @@ def test_a_removed_item_still_clears_its_pricing_backoff(monkeypatch) -> None:
 
     assert coordinator._attempts == {}
     assert coordinator._retry_after == {}
+
+
+def test_setup_with_an_unavailable_source_keeps_uid_overrides(monkeypatch) -> None:
+    """A restart during a source outage must not drop section corrections.
+
+    The source reports no items while it is unavailable, and setup used to
+    prune against that reading, so every correction was discarded and the
+    loss was persisted on shutdown.
+    """
+
+    cache = ClassificationCache()
+    cache.uid_overrides = {"uid-1": "Produce"}
+
+    class PreloadedStore(FakeStore):
+        async def async_load(self):
+            return cache
+
+    coordinator = make_coordinator([], monkeypatch)
+    coordinator.store = PreloadedStore(coordinator.hass, "synthetic-entry")
+    coordinator.source.available = False
+
+    asyncio.run(coordinator.async_setup())
+
+    assert coordinator.cache.uid_overrides == {"uid-1": "Produce"}
+
+
+def test_an_unavailable_push_keeps_the_last_known_items(monkeypatch) -> None:
+    """An unavailable source pushes an empty list; the route must not empty.
+
+    Adopting it would blank the derived list and, through the price summaries,
+    clear every quote the household had collected.
+    """
+
+    coordinator = make_coordinator([item("uid-1", "Milk")], monkeypatch)
+    coordinator.source.available = False
+
+    async def run() -> None:
+        coordinator._source_updated([])
+        await run_classification(coordinator)
+
+    asyncio.run(run())
+
+    assert [entry.summary for entry in coordinator.items] == ["Milk"]
+
+
+def test_a_recovered_source_replaces_the_kept_items(monkeypatch) -> None:
+    """Once the source is available again its reading wins."""
+
+    coordinator = make_coordinator([item("uid-1", "Milk")], monkeypatch)
+    coordinator.source.available = False
+
+    async def run() -> None:
+        coordinator._source_updated([])
+        coordinator.source.available = True
+        coordinator._source_updated([item("uid-2", "Bread")])
+        await run_classification(coordinator)
+
+    asyncio.run(run())
+
+    assert [entry.summary for entry in coordinator.items] == ["Bread"]
+
+
+def test_a_manual_refresh_keeps_items_while_the_source_is_unavailable(
+    monkeypatch,
+) -> None:
+    """The Refresh button must not blank the route during an outage."""
+
+    coordinator = make_coordinator([item("uid-1", "Milk")], monkeypatch)
+    coordinator.source._items = []
+    coordinator.source.available = False
+
+    asyncio.run(coordinator.async_refresh())
+
+    assert [entry.summary for entry in coordinator.items] == ["Milk"]
