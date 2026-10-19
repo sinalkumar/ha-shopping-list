@@ -1094,6 +1094,10 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "grocer_mirror_bytes": (
                 self._mirror_bytes if self._mirror_bytes is not None else 0
             ),
+            # The two numbers a support thread needs: how often this profile
+            # re-prices, and when a quote stops being presentable.
+            "refresh_hours": PRICE_REFRESH_HOURS,
+            "stale_after_hours": PRICE_STALE_AFTER_HOURS,
             # Support question worth answering without a log dive: is the weekly
             # rollover actually scheduled on this profile?
             "weekly_refresh": {

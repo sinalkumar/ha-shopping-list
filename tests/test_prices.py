@@ -463,8 +463,12 @@ def test_price_diagnostics_expose_counts_only(monkeypatch) -> None:
         "items_with_history",
         "grocer_history",
         "grocer_mirror_bytes",
+        "refresh_hours",
+        "stale_after_hours",
         "weekly_refresh",
     }
+    assert payload["refresh_hours"] == 3
+    assert payload["stale_after_hours"] == 24
     assert payload["weekly_refresh"] == {
         "weekday": 0,
         "hour": 6,
