@@ -48,7 +48,7 @@ from .coordinator import RouteCoordinator
 from .models import section_names
 from .prices import CHAIN_WOOLWORTHS
 from .storage import PriceStore, async_pop_store
-from .stores import HISTORY_STORES
+from .stores import store_name
 
 
 async def async_setup(hass: HomeAssistant, _config: dict[str, Any]) -> bool:
@@ -137,12 +137,12 @@ def _backfill_store_names(hass: HomeAssistant, entry: ConfigEntry) -> None:
     data = dict(getattr(entry, "data", None) or {})
     grocer_id = data.get(CONF_GROCER_STORE_ID)
     if grocer_id is not None and not data.get(CONF_GROCER_STORE_NAME):
-        data[CONF_GROCER_STORE_NAME] = HISTORY_STORES.get(grocer_id, ("", ""))[1]
+        data[CONF_GROCER_STORE_NAME] = store_name(grocer_id)
     if not data.get(CONF_PRICE_STORE_NAME):
         if data.get(CONF_PRICE_CHAIN) == CHAIN_WOOLWORTHS:
             data[CONF_PRICE_STORE_NAME] = PRICE_STORE_NAME_WOOLWORTHS_ONLINE
         elif grocer_id is not None:
-            data[CONF_PRICE_STORE_NAME] = HISTORY_STORES.get(grocer_id, ("", ""))[1]
+            data[CONF_PRICE_STORE_NAME] = store_name(grocer_id)
     hass.config_entries.async_update_entry(entry, data=data, version=2)
 
 

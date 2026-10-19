@@ -11,6 +11,7 @@ from homeassistant.exceptions import ServiceValidationError
 import smart_shopping_route as integration
 import smart_shopping_route.storage as storage_module
 from smart_shopping_route.const import (
+    CONF_GROCER_STORE_NAME,
     CONFIG_ENTRY_VERSION,
     DOMAIN,
     SERVICE_CLEAR_CACHE,
@@ -718,3 +719,23 @@ def test_migration_does_not_overwrite_a_stored_name() -> None:
     assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
 
     assert entry.data["price_store_name"] == "My local Pak'nSave"
+
+
+@pytest.mark.parametrize("stored_id", ["228", 228, 999999999, None, "not-a-store"])
+def test_store_names_degrade_instead_of_raising(stored_id) -> None:
+    """Ids come from older entry data and a regenerated catalogue."""
+
+    hass = _migrating_hass()
+    entry = SimpleNamespace(
+        version=1,
+        data={
+            "price_chain": "paknsave",
+            "price_store_id": "228",
+            "grocer_store_id": stored_id,
+        },
+    )
+
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
+
+    expected = "PAK'nSAVE Ormiston" if str(stored_id) == "228" else ""
+    assert entry.data.get(CONF_GROCER_STORE_NAME, "") == expected

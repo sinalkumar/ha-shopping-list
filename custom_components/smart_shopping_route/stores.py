@@ -245,3 +245,19 @@ HISTORY_STORES: dict[int, tuple[str, str]] = {
     300325: ("woolworths", "Woolworths Metro Halsey Street"),
     300326: ("woolworths", "Woolworths Metro Herne Bay"),
 }
+
+
+def store_name(store_id: object) -> str:
+    """Return a grocer.nz store's display name, or "" when it is unknown.
+
+    Ids reach this table from config entry data written by older releases and
+    from a generated catalogue, so a string id or a store that has since closed
+    must degrade to no name rather than raise.
+    """
+
+    try:
+        key = int(store_id)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    entry = HISTORY_STORES.get(key)
+    return entry[1] if entry else ""

@@ -21,7 +21,7 @@ from .const import (
 )
 from .models import normalize_summary, sort_items
 from .prices import CHAIN_WOOLWORTHS
-from .stores import HISTORY_STORES
+from .stores import store_name
 
 CARD_URL = "/smart_shopping_route/route-card.js"
 
@@ -39,9 +39,7 @@ def _price_store_label(coordinator: Any, prices: Any) -> str:
         return str(name)
     if prices.chain == CHAIN_WOOLWORTHS:
         return PRICE_STORE_NAME_WOOLWORTHS_ONLINE
-    return (
-        HISTORY_STORES.get(prices.grocer_store_id, ("", ""))[1] or "Current-price store"
-    )
+    return store_name(prices.grocer_store_id) or "Current-price store"
 
 
 def route_payload(coordinator: Any, *, can_control: bool) -> dict[str, Any]:
@@ -107,7 +105,7 @@ def route_payload(coordinator: Any, *, can_control: bool) -> dict[str, Any]:
         "sections": [section.name for section in coordinator.sections],
         "prices_enabled": prices.enabled,
         "price_store": _price_store_label(coordinator, prices),
-        "history_store": HISTORY_STORES.get(prices.grocer_store_id, ("", ""))[1],
+        "history_store": store_name(prices.grocer_store_id),
         "quality": prices.status_attributes(),
         "total": snapshot.total,
         "legacy_history_preserved": prices.legacy_history_preserved,
