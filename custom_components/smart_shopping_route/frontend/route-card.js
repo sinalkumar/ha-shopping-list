@@ -34,6 +34,7 @@ class SmartShoppingRouteCard extends HTMLElement {
       dialog { color:inherit; background:var(--card-background-color,#fff); border:1px solid var(--divider-color,#aaa); border-radius:12px; width:520px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 32px); padding:16px; box-sizing:border-box; }
       dialog::backdrop { background:#0008; } .close { float:right; } details { margin-top:12px; } summary { min-height:36px; cursor:pointer; }
       .completed .name { text-decoration:line-through; } .error:empty { display:none; }
+      .status-note { font-size:14px; margin:8px 0; color:var(--secondary-text-color,#555); } .status-note:empty { display:none; }
       .metadata { margin-top:4px; } .metadata summary { min-height:36px; display:list-item; }
       .error { white-space:pre-wrap; margin:8px 0; color:var(--error-color,#a00); }
       @media(max-width:440px) { ha-card {padding:12px;} .row {gap:4px;} .edit {padding:6px;} }
@@ -41,6 +42,15 @@ class SmartShoppingRouteCard extends HTMLElement {
     this._content = node("div");
     this._dialog = node("dialog"); this._dialog.setAttribute("aria-label", "Edit shopping item");
     this.shadowRoot.append(style, this._content, this._dialog);
+    // Render-surviving state. A refresh rebuilds the card, so anything the
+    // household has typed but not yet submitted has to live outside the DOM.
+    this._draft = { add: "" };
+    this._openDetails = new Set();
+    this._dialogBaseline = null;
+    this._confirmDiscard = false;
+    this._dialog.addEventListener("cancel", (event) => {
+      if (this._dialogDirty()) { event.preventDefault(); this._warnDiscard(); }
+    });
   }
 
   setConfig(config) {
@@ -49,6 +59,8 @@ class SmartShoppingRouteCard extends HTMLElement {
     this._data = null;
     this._attempted = false;
     this._lastState = null;
+    this._draft = { add: "" };
+    this._openDetails = new Set();
     this._load();
   }
   static getStubConfig() { return { entity: "todo.shopping_route" }; }
@@ -100,6 +112,7 @@ class SmartShoppingRouteCard extends HTMLElement {
     if (this._busy) return;
     this._busy = true;
     this._dialogError && (this._dialogError.textContent = "");
+    this._dialogStatus && (this._dialogStatus.textContent = "");
     this.shadowRoot.querySelectorAll("button").forEach((button) => { button.disabled = true; });
     let success = false;
     try {
@@ -125,6 +138,8 @@ class SmartShoppingRouteCard extends HTMLElement {
   }
 
   _render() {
+    const focused = this.shadowRoot.activeElement;
+    const addHadFocus = focused !== null && focused === this._content.querySelector("form.add input");
     const card = node("ha-card");
     const header = node("div", undefined, "header");
     header.append(node("h2", this._data?.name || "Shopping route"), this._button("Refresh", () => this._action(() => this._service("refresh"))));
@@ -142,20 +157,26 @@ class SmartShoppingRouteCard extends HTMLElement {
       const status = node("div", undefined, "status"); status.setAttribute("role", "status");
       status.append(node("div", label), node("div", `${data.price_store} · Oldest quote: ${date(quality.oldest_quote_at)}`, "muted"));
       if (data.history_store) status.append(node("div", `History: ${data.history_store}`, "muted"));
-      if (data.legacy_history_preserved) status.append(node("div", "Legacy history is backed up but excluded from comparisons until product/store identity is verified.", "muted"));
+      if (data.legacy_history_preserved) status.append(node("div", "Older price history is backed up but not compared with current prices: its product or store identity is unverified. It stays until newer history replaces it.", "muted"));
       card.append(status);
     }
     if (!data.available) card.append(node("p", "Source list unavailable. Saved prices may be stale.", "warning"));
     if (this._can(1)) {
       const form = node("form", undefined, "add");
       const input = node("input"); input.required = true; input.placeholder = "Add item"; input.setAttribute("aria-label", "New item name");
+      input.value = this._draft.add;
+      input.addEventListener("input", () => { this._draft.add = input.value; });
       const add = this._button("Add", () => form.requestSubmit());
       form.append(input, add);
-      form.addEventListener("submit", (event) => {
+      form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const summary = input.value.trim();
+        if (!summary) return;
         const oldCount = data.items.filter((item) => item.summary === summary).length;
-        if (summary) this._action(() => this._hass.callService("todo", "add_item", { entity_id: this._config.entity, item: summary }), { verify: (updated) => updated.items.filter((item) => item.summary === summary).length > oldCount });
+        const added = await this._action(() => this._hass.callService("todo", "add_item", { entity_id: this._config.entity, item: summary }), { verify: (updated) => updated.items.filter((item) => item.summary === summary).length > oldCount });
+        // Keep the text when the add was not confirmed so it can be retried,
+        // and clear it only once the source list actually shows the new item.
+        if (added) { this._draft.add = ""; this._render(); }
       });
       card.append(form);
     }
@@ -182,6 +203,8 @@ class SmartShoppingRouteCard extends HTMLElement {
         else if (item.price.was_price > item.price.price) body.append(node("div", `Was ${money(item.price.was_price)}`, "muted"));
         else if (item.previous?.price > item.price.price) body.append(node("div", `Previously seen ${money(item.previous.price)} · ${date(item.previous.ts)}`, "muted"));
         const details = node("details", undefined, "metadata");
+        if (this._openDetails.has(item.uid)) details.open = true;
+        details.addEventListener("toggle", () => { if (details.open) this._openDetails.add(item.uid); else this._openDetails.delete(item.uid); });
         details.append(node("summary", "Product & history"), node("div", item.price.product_name, "muted"));
         for (const [points, label] of [[item.history, "Observed price history"], [item.store_history, `Physical-store history: ${data.history_store} (not compared with online quotes)`]]) {
           if (points?.length) {
@@ -201,22 +224,34 @@ class SmartShoppingRouteCard extends HTMLElement {
       card.append(row);
     }
     if (!data.items.length) card.append(node("p", "Your shopping list is empty."));
+    // Only remember expansions for rows that still exist, so a long session
+    // cannot accumulate every item the household ever opened.
+    const uids = new Set(data.items.map((item) => item.uid));
+    for (const uid of this._openDetails) if (!uids.has(uid)) this._openDetails.delete(uid);
     this._content.replaceChildren(card);
+    if (addHadFocus) {
+      const next = this._content.querySelector("form.add input");
+      if (next) { next.focus(); const end = next.value.length; next.setSelectionRange?.(end, end); }
+    }
   }
 
-  _field(label, value = "", tag = "input") {
+  _field(label, value = "", tag = "input", container = null) {
     const wrapper = node("label"); wrapper.append(node("span", label));
-    const input = node(tag); input.setAttribute("aria-label", label); input.value = value; wrapper.append(input); this._dialog.append(wrapper);
+    const input = node(tag); input.setAttribute("aria-label", label); input.value = value; wrapper.append(input); (container || this._dialog).append(wrapper);
     return input;
   }
   _edit(item) {
     this._dialog.replaceChildren();
-    const close = this._button("Close", () => this._dialog.close(), "close");
+    this._confirmDiscard = false;
+    const close = this._button("Close", () => this._closeDialog(), "close");
     this._dialog.append(close, node("h2", "Edit shopping item"));
     this._dialogError = node("div", "", "error"); this._dialogError.setAttribute("role", "alert"); this._dialog.append(this._dialogError);
+    this._dialogStatus = node("div", "", "status-note"); this._dialogStatus.setAttribute("role", "status"); this._dialog.append(this._dialogStatus);
     const name = this._field("Item name", item.summary);
     const notes = this._field("Notes", item.notes, "textarea");
     notes.disabled = !this._can(64);
+    this._dialogBaseline = { name: item.summary, notes: item.notes || "" };
+    for (const typed of [name, notes]) typed.addEventListener("input", () => { this._confirmDiscard = false; this._dialogStatus.textContent = ""; });
     if (!this._can(64)) this._dialog.append(node("p", "This source list does not support notes. Price information is read-only.", "muted"));
     this._dialog.append(this._button("Save item", () => {
       if (!name.value.trim()) { this._dialogError.textContent = "An item name is required."; return; }
@@ -229,25 +264,43 @@ class SmartShoppingRouteCard extends HTMLElement {
     const placeholder = node("option", `Current: ${item.section} — choose section`); placeholder.value = ""; placeholder.disabled = true; section.append(placeholder);
     for (const value of this._data.sections) { const option = node("option", value); option.value = value; section.append(option); }
     section.value = this._data.sections.includes(item.section) ? item.section : "";
-    this._dialog.append(this._button("Move to section", () => {
+    this._dialog.append(this._button("Move to section", async () => {
       if (!section.value) { this._dialogError.textContent = "Choose a section first."; return; }
-      this._action(() => this._service("set_item_section", { item_uid: item.uid, section: section.value, remember: true }), { close: true, verify: (data) => data.items.some((row) => row.uid === item.uid && row.section === section.value) });
+      const target = section.value;
+      const moved = await this._action(() => this._service("set_item_section", { item_uid: item.uid, section: target, remember: true }), { verify: (data) => data.items.some((row) => row.uid === item.uid && row.section === target) });
+      if (!moved) return;
+      // Independent of the name/notes draft, so the editor stays open rather
+      // than silently throwing those edits away.
+      placeholder.textContent = `Current: ${target} — choose section`;
+      this._dialogStatus.textContent = this._dialogDirty() ? `Moved to ${target}. Your unsaved name and notes are still here.` : `Moved to ${target}.`;
     }));
     if (this._data.prices_enabled) {
-      this._dialog.append(node("h3", "Wrong product?"), node("p", "Pins apply to every occurrence of this item name in this profile. They do not rename the source item.", "muted"));
-      const query = this._field("Product search", item.pin?.query || item.summary);
-      const product = this._field("Exact retailer product ID (optional)", item.pin?.product_id || "");
-      const history = this._field("Exact grocer.nz product ID or URL (optional)", item.pin?.grocer_product_id || "");
+      // Collapsed by default: product matching is a power-user correction, and
+      // the editor is a long scroll on a phone.
+      const advanced = node("details", undefined, "advanced");
+      if (item.pin) advanced.open = true;
+      advanced.append(node("summary", "Wrong product?"));
+      advanced.append(node("p", "Pins apply to every occurrence of this item name in this profile. They do not rename the source item.", "muted"));
+      const query = this._field("Product search", item.pin?.query || item.summary, "input", advanced);
+      const product = this._field("Exact retailer product ID (optional)", item.pin?.product_id || "", "input", advanced);
+      const history = this._field("Exact grocer.nz product ID or URL (optional)", item.pin?.grocer_product_id || "", "input", advanced);
       history.inputMode = "numeric";
-      this._dialog.append(this._button("Pin product", () => {
+      advanced.append(this._button("Pin product", async () => {
         const historyMatch = history.value.trim().match(/^(?:https:\/\/grocer\.nz\/product\/)?([1-9]\d*)(?:\/[^\s]*)?$/);
         if (history.value.trim() && !historyMatch) { this._dialogError.textContent = "Enter a positive history product ID or a grocer.nz product URL."; return; }
         if (historyMatch && !this._data.history_store) { this._dialogError.textContent = "Choose a price-history store in integration settings before pinning history."; return; }
         const pin = { item_uid: item.uid, query: query.value.trim() };
         if (product.value.trim()) pin.product_id = product.value.trim();
         if (historyMatch) pin.grocer_product_id = Number(historyMatch[1]);
-        this._action(() => this._service("pin_item_product", pin), { close: true, verify: (data) => data.items.some((row) => row.uid === item.uid && row.pin?.query === pin.query && (!pin.product_id || row.pin.product_id === pin.product_id) && (!pin.grocer_product_id || row.pin.grocer_product_id === pin.grocer_product_id)) });
-      }), this._button("Reset product match", () => this._action(() => this._service("unpin_item_product", { item_uid: item.uid }), { close: true, verify: (data) => data.items.some((row) => row.uid === item.uid && !row.pin) })));
+        const pinned = await this._action(() => this._service("pin_item_product", pin), { verify: (data) => data.items.some((row) => row.uid === item.uid && row.pin?.query === pin.query && (!pin.product_id || row.pin.product_id === pin.product_id) && (!pin.grocer_product_id || row.pin.grocer_product_id === pin.grocer_product_id)) });
+        if (pinned) this._dialogStatus.textContent = this._dialogDirty() ? "Product match pinned. Your unsaved name and notes are still here." : "Product match pinned.";
+      }), this._button("Reset product match", async () => {
+        const cleared = await this._action(() => this._service("unpin_item_product", { item_uid: item.uid }), { verify: (data) => data.items.some((row) => row.uid === item.uid && !row.pin) });
+        if (!cleared) return;
+        query.value = item.summary; product.value = ""; history.value = "";
+        this._dialogStatus.textContent = this._dialogDirty() ? "Product match cleared. Your unsaved name and notes are still here." : "Product match cleared.";
+      }));
+      this._dialog.append(advanced);
     }
     if (this._can(2)) {
       const confirm = node("label"); const check = node("input"); check.type = "checkbox"; confirm.append(check, document.createTextNode("Confirm deletion from the source list")); this._dialog.append(confirm);
@@ -257,6 +310,22 @@ class SmartShoppingRouteCard extends HTMLElement {
       }));
     }
     this._dialog.showModal(); name.focus();
+  }
+
+  _dialogDirty() {
+    if (!this._dialog?.open || !this._dialogBaseline) return false;
+    const name = this._dialog.querySelector('[aria-label="Item name"]');
+    const notes = this._dialog.querySelector('[aria-label="Notes"]');
+    return (name !== null && name.value !== this._dialogBaseline.name) || (notes !== null && notes.value !== this._dialogBaseline.notes);
+  }
+  _warnDiscard() {
+    this._confirmDiscard = true;
+    this._dialogStatus.textContent = "Unsaved changes. Save item to keep them, or choose Close again to discard them.";
+  }
+  _closeDialog() {
+    // Ask once instead of dropping typed notes on a stray Close or Escape.
+    if (this._dialogDirty() && !this._confirmDiscard) { this._warnDiscard(); return; }
+    this._dialog.close();
   }
 }
 

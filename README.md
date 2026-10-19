@@ -95,6 +95,12 @@ search/product/history pins, reset matching, and confirmed deletion. Prices are
 read-only, with no floating button covering the last row. Duplicate names retain
 independent source UIDs; product pins apply to every occurrence of the same name.
 
+A background refresh never costs you typing: an unfinished item name and an
+expanded product section survive a re-render, and the drafts are cleared only
+when the source list confirms the change. Section and product-match actions are
+independent of the name and notes fields, so they leave the editor open instead
+of discarding unsaved text; closing with unsaved edits asks once first.
+
 Private item data is fetched through an authenticated WebSocket endpoint, not
 stored in new entity attributes. Both route and source permissions are checked;
 read-only users cannot mutate either. Resource registration is manual: updating
@@ -250,7 +256,9 @@ and history store/product identities. Re-pinning invalidates dependent compariso
 and in-flight results. Changing scopes cannot create a false price drop.
 Legacy histories without provenance are retained in a bounded backup but excluded
 from comparisons; observations rebuild under verified identities. Old scoped
-series are archived separately, with bounded retention.
+series are archived separately, with bounded retention. The backup is bounded by
+entry count, not by age, so the card's notice stays until newer verified history
+replaces those entries.
 
 Known limits: Pak'nSave prices are per store, so a profile is tied to the store chosen at setup, and the drop signal only becomes meaningful after the first price change.
 

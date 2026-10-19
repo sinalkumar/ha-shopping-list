@@ -807,6 +807,17 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         if self._pins or self._snapshot.history:
             await self._async_persist()
 
+    async def async_remove_store(self) -> None:
+        """Delete this profile's persisted pins and price history.
+
+        Removal has to go through the store instance that may have queued a
+        write: Home Assistant's ``Store`` cancels its final-write listener per
+        instance, so a fresh instance would delete the file and leave the
+        owner's queued write to recreate it while Home Assistant shuts down.
+        """
+
+        await self._price_store.async_remove()
+
     async def async_refresh(self, *, force: bool = True) -> None:  # type: ignore[override]
         """Refresh under a tracked task so shutdown can cancel it.
 
@@ -943,6 +954,11 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 self._snapshot.drops_now.pop(key, None)
                 self._snapshot.store_history.pop(key, None)
                 self._matched_products.pop(key, None)
+                # The item is gone, so its imported history went with it. A
+                # re-added item must import again; otherwise the cached flag
+                # silently suppresses its store history until the next mirror
+                # sync or restart.
+                self._backfilled.discard(key)
         for key in list(self._snapshot.failed):
             if key not in active:
                 self._snapshot.failed.discard(key)

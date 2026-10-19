@@ -1950,3 +1950,48 @@ def test_a_missed_cycle_does_not_make_the_basket_stale(monkeypatch) -> None:
     snapshot.observed_at["milk"] = time.time() - (PRICE_STALE_AFTER_HOURS * 3600 + 60)
     assert snapshot.stale_for("milk")
     assert snapshot.stale_count == 1
+
+
+def test_a_readded_item_imports_its_store_history_again(monkeypatch) -> None:
+    """Removing an item discards its imported history, so the cache must go too.
+
+    Otherwise the "already backfilled" flag outlived the data it described and a
+    re-added Woolworths item showed no in-store history until the next mirror
+    sync or restart.
+    """
+
+    from smart_shopping_route.grocer import GrocerMatch, GrocerPrice, GrocerProduct
+
+    summaries = ["Milk"]
+    store_quote = PriceQuote(
+        chain=CHAIN_WOOLWORTHS, product_id="p", product_name="Milk 2L", price=4.0
+    )
+    coordinator, _calls = make_price_coordinator(
+        monkeypatch, summaries, {"Milk": store_quote}
+    )
+    coordinator.chain = CHAIN_WOOLWORTHS
+    coordinator.grocer_store_id = 228
+    match = GrocerMatch(
+        product=GrocerProduct(6403, "Milk", "Example", "2L"),
+        price=GrocerPrice(6403, 4.0, None),
+        history=[(1000.0, 3.0), (2000.0, 4.0)],
+    )
+
+    async def fake_match(*_args, **_kwargs):
+        return match
+
+    coordinator._grocer_data = SimpleNamespace(async_match_with_history=fake_match)
+
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.snapshot.store_history["milk"]
+
+    summaries.clear()
+    asyncio.run(coordinator._async_update_data())
+    assert "milk" not in coordinator.snapshot.store_history
+
+    summaries.append("Milk")
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.snapshot.store_history["milk"], (
+        "a re-added item must import its store history again"
+    )

@@ -204,7 +204,12 @@ class RouteCoordinator:
     @callback
     def _source_updated(self, items: list[TodoItem]) -> None:
         self.items = items
-        if items and self.cache.prune_uids({item.uid for item in items if item.uid}):
+        # An unavailable source can report an empty list, and pruning then would
+        # drop section corrections for items that still exist. Only a reading
+        # from an available source is authoritative.
+        if self.source.available and self.cache.prune_uids({
+            item.uid for item in items if item.uid
+        }):
             self._schedule_save()
         self._prune_retries(items)
         self._notify()

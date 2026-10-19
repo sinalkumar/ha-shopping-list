@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.8.9
+
+- Follow the source to-do entity across a reload. A to-do integration can
+  unload and re-create its entity under the same entity ID, and the replacement
+  is a different object with its own listener list. The route had subscribed
+  once at setup, so after such a reload it kept showing the removed entity's
+  items while still reporting itself available. The subscription now follows the
+  entity ID, replays the replacement's items immediately, and is released on
+  unload.
+- Stop a card refresh from eating an unsaved item name. Every reload rebuilt the
+  add row, so a background price update or the 60-second timer could clear what
+  was being typed. The draft and its focus now survive a render, an expanded
+  "Product & history" section stays expanded, and the text is cleared only after
+  the source list actually shows the added item.
+- Keep the editor open when a section move, pin, or pin reset succeeds. Those
+  actions are independent of the name and notes fields, but they used to close
+  the whole dialog and silently discard any unsaved text. Closing (or pressing
+  Escape) with unsaved name or notes now asks once before discarding them.
+- Delete a removed profile's pins and price history through the store instance
+  that owns them. Home Assistant's `Store` cancels its final-write listener per
+  instance, so removing through a fresh instance could delete the file and then
+  let a queued shutdown write recreate it.
+- Re-import grocer.nz history for an item that is removed and added again. The
+  "already backfilled" flag outlived the history it described, so a re-added
+  Woolworths item showed no in-store history until the next mirror sync or
+  restart.
+- Prune stored section overrides when the source list becomes empty. The last
+  item leaving was treated as "nothing to prune", leaving overrides for deleted
+  item IDs behind. An unavailable source that reports an empty list is still
+  left alone, because that is not a removal.
+
 ## 0.8.8
 
 - Name the store a quote came from. Profiles written before the names were

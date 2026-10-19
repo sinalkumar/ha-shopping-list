@@ -234,3 +234,102 @@ test("an unmatched row explains itself the same way the native list does", async
   assert.match(card.shadowRoot.textContent, /no price match — refresh, rename or pin this item/);
   assert.doesNotMatch(card.shadowRoot.textContent, /Unpriced/);
 });
+
+const type = (card, input, value) => {
+  input.value = value;
+  input.dispatchEvent(new card.ownerDocument.defaultView.Event("input", { bubbles: true }));
+};
+const submitAdd = (card) => card.shadowRoot.querySelector("form.add").dispatchEvent(new card.ownerDocument.defaultView.Event("submit", { bubbles: true, cancelable: true }));
+const addField = (card) => card.shadowRoot.querySelector('input[aria-label="New item name"]');
+
+test("a refresh keeps an unfinished add-item name and its focus", async (t) => {
+  const { card } = fixture(t); await settle(card);
+  const input = addField(card); input.focus(); type(card, input, "Bread to add");
+  // Both the 60-second timer and a state push take this path.
+  await card._load();
+  const next = addField(card);
+  assert.equal(next.value, "Bread to add");
+  assert.equal(card.shadowRoot.activeElement, next);
+});
+
+test("a failed add keeps the typed name; a confirmed add clears it", async (t) => {
+  const { card, data, hass } = fixture(t); await settle(card);
+  const original = hass.callService;
+  hass.callService = async () => { throw new Error("Simulated failure"); };
+  type(card, addField(card), "Bread"); submitAdd(card); await settle(card);
+  assert.equal(addField(card).value, "Bread");
+  assert.match(card.shadowRoot.querySelector(".error").textContent, /Simulated failure/);
+
+  hass.callService = original;
+  submitAdd(card); await settle(card);
+  assert.ok(data.items.some((row) => row.summary === "Bread"));
+  assert.equal(addField(card).value, "");
+});
+
+test("moving to another section keeps unsaved notes in the open editor", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  button(card.shadowRoot, "Edit").click();
+  type(card, field(card._dialog, "Notes"), "Unsaved draft notes");
+  field(card._dialog, "Section").value = "Drinks";
+  button(card._dialog, "Move to section").click(); await settle(card);
+  assert.equal(data.items[0].section, "Drinks");
+  assert.equal(card._dialog.open, true);
+  assert.equal(field(card._dialog, "Notes").value, "Unsaved draft notes");
+  assert.match(card._dialogStatus.textContent, /Moved to Drinks/);
+});
+
+test("pinning a product keeps unsaved notes in the open editor", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  button(card.shadowRoot, "Edit").click();
+  type(card, field(card._dialog, "Notes"), "Unsaved draft notes");
+  field(card._dialog, "Exact grocer.nz product ID or URL (optional)").value = "123";
+  button(card._dialog, "Pin product").click(); await settle(card);
+  assert.equal(data.items[0].pin.grocer_product_id, 123);
+  assert.equal(card._dialog.open, true);
+  assert.equal(field(card._dialog, "Notes").value, "Unsaved draft notes");
+});
+
+test("closing the editor asks once before discarding unsaved notes", async (t) => {
+  const { card } = fixture(t); await settle(card);
+  button(card.shadowRoot, "Edit").click();
+  type(card, field(card._dialog, "Notes"), "Unsaved draft notes");
+  button(card._dialog, "Close").click(); await settle(card);
+  assert.equal(card._dialog.open, true);
+  assert.match(card._dialogStatus.textContent, /Unsaved changes/);
+  button(card._dialog, "Close").click(); await settle(card);
+  assert.equal(card._dialog.open, false);
+});
+
+test("an editor with no typed changes closes without a prompt", async (t) => {
+  const { card } = fixture(t); await settle(card);
+  button(card.shadowRoot, "Edit").click();
+  button(card._dialog, "Close").click(); await settle(card);
+  assert.equal(card._dialog.open, false);
+});
+
+test("an expanded product history stays expanded across a refresh", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.items[0].history = [{ ts: Date.now() / 1000, price: 4 }]; await card._load();
+  const details = card.shadowRoot.querySelector("details");
+  details.open = true;
+  details.dispatchEvent(new card.ownerDocument.defaultView.Event("toggle"));
+  data.items[0].price.price = 3.5; await card._load();
+  assert.equal(card.shadowRoot.querySelector("details").open, true);
+});
+
+test("advanced product matching starts collapsed and opens when a pin exists", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  button(card.shadowRoot, "Edit").click();
+  const advanced = card._dialog.querySelector("details.advanced");
+  assert.equal(advanced.open, false);
+  // Collapsing must not orphan the inputs from their labels.
+  for (const label of ["Product search", "Exact retailer product ID (optional)", "Exact grocer.nz product ID or URL (optional)"]) {
+    const input = card._dialog.querySelector(`[aria-label="${label}"]`);
+    assert.ok(input.closest("label"), `${label} lost its label`);
+  }
+  card._dialog.close();
+
+  data.items[0].pin = { query: "Milk 2L", product_id: "p1", grocer_product_id: 123 }; await card._load();
+  button(card.shadowRoot, "Edit").click();
+  assert.equal(card._dialog.querySelector("details.advanced").open, true);
+});

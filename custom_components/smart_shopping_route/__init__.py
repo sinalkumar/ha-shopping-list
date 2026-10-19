@@ -111,7 +111,12 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     # pending write from recreating the file during shutdown.
     await async_pop_store(hass, entry.entry_id).async_remove()
     # Pins and price history are user data too, and must not outlive the profile.
-    await PriceStore(hass, entry.entry_id).async_remove()
+    # Remove them through the coordinator's own store instance for the same
+    # reason as the cache above: a pending write must not recreate them.
+    if coordinator is not None:
+        await coordinator.prices.async_remove_store()
+    else:
+        await PriceStore(hass, entry.entry_id).async_remove()
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

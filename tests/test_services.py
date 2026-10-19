@@ -254,7 +254,13 @@ def test_removed_entry_tears_down_a_surviving_coordinator(hass, monkeypatch) -> 
 
     events: list[str] = []
 
+    class Prices:
+        async def async_remove_store(self) -> None:
+            events.append("remove-prices")
+
     class Coordinator:
+        prices = Prices()
+
         async def async_shutdown(self) -> None:
             events.append("shutdown")
 
@@ -274,7 +280,9 @@ def test_removed_entry_tears_down_a_surviving_coordinator(hass, monkeypatch) -> 
 
     asyncio.run(integration.async_remove_entry(hass, entry))
 
-    assert events == ["shutdown", "remove:synthetic-entry"]
+    # Shutdown first, then both stores, so nothing can queue a write afterwards.
+    assert events == ["shutdown", "remove:synthetic-entry", "remove-prices"]
+    assert _FakePriceStore.removed == []
     assert DOMAIN not in hass.data or entry.entry_id not in hass.data[DOMAIN]
 
 
@@ -432,6 +440,7 @@ def test_removal_reuses_the_profiles_own_store_instance(hass, monkeypatch) -> No
     from smart_shopping_route.storage import STORES_DATA_KEY, async_get_store
 
     events: list[str] = []
+    _FakePriceStore.removed.clear()
 
     class Store:
         def __init__(self, _hass, entry_id) -> None:
@@ -446,9 +455,13 @@ def test_removal_reuses_the_profiles_own_store_instance(hass, monkeypatch) -> No
     class Coordinator:
         def __init__(self) -> None:
             self.shutdown = 0
+            self.prices = SimpleNamespace(async_remove_store=self.async_remove_store)
 
         async def async_shutdown(self) -> None:
             self.shutdown += 1
+
+        async def async_remove_store(self) -> None:
+            events.append("remove-prices")
 
     coordinator = Coordinator()
     hass.data[DOMAIN] = {"synthetic-entry": coordinator}
@@ -463,7 +476,12 @@ def test_removal_reuses_the_profiles_own_store_instance(hass, monkeypatch) -> No
     )
 
     assert coordinator.shutdown == 1
-    assert events == [f"remove:synthetic-entry:{id(coordinator_store)}"]
+    assert events == [
+        f"remove:synthetic-entry:{id(coordinator_store)}",
+        "remove-prices",
+    ]
+    # Pins and history go through the coordinator's own store, never a fresh one.
+    assert _FakePriceStore.removed == []
     assert hass.data[STORES_DATA_KEY] == {}
 
 

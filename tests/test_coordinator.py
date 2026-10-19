@@ -45,10 +45,7 @@ class FakeSource:
     def __init__(self, items) -> None:
         self._items = list(items)
         self.listener = None
-
-    @property
-    def available(self) -> bool:
-        return True
+        self.available = True
 
     def items(self) -> list[TodoItem]:
         return [copy.copy(item) for item in self._items]
@@ -326,6 +323,34 @@ def test_source_update_keeps_overrides_while_the_item_exists(monkeypatch) -> Non
     asyncio.run(
         push_source_update(coordinator, [item("uid-1", "Milk"), item("uid-2", "Bread")])
     )
+
+    assert coordinator.cache.uid_overrides == {"uid-1": "Produce"}
+
+
+def test_emptying_the_list_also_prunes_uid_overrides(monkeypatch) -> None:
+    """The last item leaving is still a removal.
+
+    Keeping the overrides of a deleted UID is only harmless while the source
+    never reuses one; a stale correction could otherwise land on an unrelated
+    item later.
+    """
+
+    coordinator = make_coordinator([item("uid-1", "Milk")], monkeypatch)
+    asyncio.run(coordinator.async_set_section("uid-1", "Produce", remember=False))
+
+    asyncio.run(push_source_update(coordinator, []))
+
+    assert coordinator.cache.uid_overrides == {}
+
+
+def test_an_unavailable_source_does_not_prune_uid_overrides(monkeypatch) -> None:
+    """An unavailable source can report an empty list; that is not a removal."""
+
+    coordinator = make_coordinator([item("uid-1", "Milk")], monkeypatch)
+    asyncio.run(coordinator.async_set_section("uid-1", "Produce", remember=False))
+    coordinator.source.available = False
+
+    asyncio.run(push_source_update(coordinator, []))
 
     assert coordinator.cache.uid_overrides == {"uid-1": "Produce"}
 
