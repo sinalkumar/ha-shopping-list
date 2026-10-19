@@ -459,6 +459,12 @@ def test_price_diagnostics_expose_counts_only(monkeypatch) -> None:
         "items_with_history",
         "grocer_history",
         "grocer_mirror_bytes",
+        "weekly_refresh",
+    }
+    assert payload["weekly_refresh"] == {
+        "weekday": 0,
+        "hour": 6,
+        "scheduled": False,
     }
     assert "Anchor" not in repr(payload)
     assert "Butter" not in repr(payload)

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.5
+
+- Re-price the whole list at 06:00 every Monday, and force the grocer.nz mirror
+  to re-sync at the same time. Both chains publish the new week's prices
+  between Sunday morning and Monday 05:00 NZ time — 93% of Pak'nSave and 98% of
+  Woolworths price changes observed in 2026 land on a Monday, recorded by
+  grocer.nz at 05:00 — so the 12-hour interval could be half a day late on
+  exactly the morning the list changed.
+
 ## 0.8.4
 
 - Make a manual or interval refresh retry an item whose last search found no

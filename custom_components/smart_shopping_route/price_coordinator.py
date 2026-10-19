@@ -21,7 +21,9 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_GROCER_STORE_ID,
@@ -37,6 +39,8 @@ from .const import (
     PRICE_HISTORY_MIN_INTERVAL,
     PRICE_PIN_MAX,
     PRICE_REFRESH_HOURS,
+    PRICE_WEEKLY_REFRESH_HOUR,
+    PRICE_WEEKLY_REFRESH_WEEKDAY,
 )
 from .grocer import GrocerData, GrocerError
 from .models import normalize_summary
@@ -250,6 +254,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._semaphore = asyncio.Semaphore(PRICE_CONCURRENCY)
         self._update_task: asyncio.Task[Any] | None = None
         self._force_full = False
+        self._force_grocer = False
+        self._unsub_weekly: CALLBACK_TYPE | None = None
         self._rerun_requested = False
         self._closed = False
         self._pins: dict[str, ProductPin] = {}
@@ -504,6 +510,34 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             self._unsub_listener = self.async_add_listener(
                 self._async_handle_update_done
             )
+        # The weekly rollover is the one moment the interval is too slow: the
+        # whole list changes price at once, so waiting up to 12 hours would price
+        # the week's shop against last week's shelf.
+        if self._unsub_weekly is None:
+            self._unsub_weekly = async_track_time_change(
+                self.hass,
+                self._async_weekly_rollover,
+                hour=PRICE_WEEKLY_REFRESH_HOUR,
+                minute=0,
+                second=0,
+            )
+
+    async def _async_weekly_rollover(self, now: Any = None) -> None:
+        """Re-price everything right after the week's prices are published.
+
+        The listener fires every day at the configured hour, so the weekday is
+        checked here instead of registering one listener per day.
+        """
+
+        if self._closed or self._client is None:
+            return
+        moment = now if now is not None else dt_util.now()
+        if moment.weekday() != PRICE_WEEKLY_REFRESH_WEEKDAY:
+            return
+        # grocer.nz history is what makes a Pak'nSave special visible at all, so
+        # the mirror is refreshed with the prices rather than on its own timer.
+        self._force_grocer = True
+        await self.async_refresh(force=True)
 
     @callback
     def _async_handle_update_done(self) -> None:
@@ -751,6 +785,9 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         if self._unsub_listener is not None:
             self._unsub_listener()
             self._unsub_listener = None
+        if self._unsub_weekly is not None:
+            self._unsub_weekly()
+            self._unsub_weekly = None
         await super().async_shutdown()
         # DataUpdateCoordinator cancels scheduled refreshes but not a request
         # already in flight, so await it here; otherwise a slow retailer could
@@ -795,7 +832,11 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             await self.async_refresh(force=False)
 
     async def _async_refresh_guarded(self) -> None:
-        await self.async_sync_grocer()
+        # Read and clear here: a refresh already in flight leaves the request
+        # pending for the rerun rather than dropping it.
+        force_grocer = self._force_grocer
+        self._force_grocer = False
+        await self.async_sync_grocer(force=force_grocer)
         try:
             await super().async_refresh()
         except UpdateFailed:
@@ -1046,4 +1087,11 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "grocer_mirror_bytes": (
                 self._mirror_bytes if self._mirror_bytes is not None else 0
             ),
+            # Support question worth answering without a log dive: is the weekly
+            # rollover actually scheduled on this profile?
+            "weekly_refresh": {
+                "weekday": PRICE_WEEKLY_REFRESH_WEEKDAY,
+                "hour": PRICE_WEEKLY_REFRESH_HOUR,
+                "scheduled": self._unsub_weekly is not None,
+            },
         }

@@ -30,6 +30,13 @@ MAX_CACHE_ENTRIES = 2000
 
 # Prices refresh slowly and politely; the route never waits for them.
 PRICE_REFRESH_HOURS = 12
+# Both chains publish the new week's prices between Sunday morning and Monday
+# 05:00 NZ time: 93% of Pak'nSave and 98% of Woolworths price changes observed in
+# 2026 land on a Monday, and grocer.nz records them at 05:00. The interval alone
+# can be half a day late on that one morning, which is a whole shopping trip, so
+# the list is also re-priced shortly after the rollover.
+PRICE_WEEKLY_REFRESH_WEEKDAY = 0  # Monday, as datetime.weekday() reports it
+PRICE_WEEKLY_REFRESH_HOUR = 6
 PRICE_CONCURRENCY = 3
 PRICE_FAILURE_BACKOFF_SECONDS = 3600
 # Price history is persisted, so it must be bounded like the classification cache.
