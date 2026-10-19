@@ -227,9 +227,12 @@ class SmartShoppingRouteCard extends HTMLElement {
     // list: saying "empty" there contradicts the warning above it.
     if (!data.items.length && data.available) card.append(node("p", "Your shopping list is empty."));
     // Only remember expansions for rows that still exist, so a long session
-    // cannot accumulate every item the household ever opened.
-    const uids = new Set(data.items.map((item) => item.uid));
-    for (const uid of this._openDetails) if (!uids.has(uid)) this._openDetails.delete(uid);
+    // cannot accumulate every item the household ever opened. An unavailable
+    // source reports no items, which is not a removal, so keep them then.
+    if (data.available) {
+      const uids = new Set(data.items.map((item) => item.uid));
+      for (const uid of this._openDetails) if (!uids.has(uid)) this._openDetails.delete(uid);
+    }
     this._content.replaceChildren(card);
     if (addHadFocus) {
       const next = this._content.querySelector("form.add input");

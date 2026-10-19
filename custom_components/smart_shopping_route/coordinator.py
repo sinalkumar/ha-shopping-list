@@ -253,9 +253,16 @@ class RouteCoordinator:
 
     @callback
     def _prune_retries(self, items: list[TodoItem]) -> None:
-        """Forget backoff for items that are no longer on the list."""
+        """Forget backoff for items that are no longer on the list.
+
+        Only an available source is authoritative: an unavailable one reports no
+        items, and treating that as a removal would drop the backoff for every
+        item and immediately retry lookups that had just failed.
+        """
 
         if not self._attempts and not self._retry_after:
+            return
+        if not self.source.available:
             return
         present = {normalize_summary(item.summary or "") for item in items}
         for store in (self._attempts, self._retry_after):

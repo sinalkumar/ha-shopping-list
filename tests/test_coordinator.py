@@ -668,3 +668,32 @@ def test_a_push_refresh_dispatches_the_price_signal_once(monkeypatch) -> None:
     asyncio.run(coordinator.async_price_refresh())
 
     assert sent == [coordinator.price_signal]
+
+
+def test_an_unavailable_source_keeps_pricing_backoff(monkeypatch) -> None:
+    """An unavailable source reports no items; that is not a removal.
+
+    Dropping the backoff there would immediately retry lookups that had just
+    failed, which is exactly what the backoff exists to prevent.
+    """
+
+    coordinator = make_coordinator([item("uid-1", "Milk")], monkeypatch)
+    coordinator._attempts["milk"] = 2
+    coordinator._retry_after["milk"] = 999.0
+    coordinator.source.available = False
+
+    coordinator._source_updated([])
+
+    assert coordinator._attempts == {"milk": 2}
+    assert coordinator._retry_after == {"milk": 999.0}
+
+
+def test_a_removed_item_still_clears_its_pricing_backoff(monkeypatch) -> None:
+    coordinator = make_coordinator([item("uid-1", "Milk")], monkeypatch)
+    coordinator._attempts["milk"] = 2
+    coordinator._retry_after["milk"] = 999.0
+
+    coordinator._source_updated([])
+
+    assert coordinator._attempts == {}
+    assert coordinator._retry_after == {}

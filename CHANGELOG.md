@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.11
+
+- Keep an expanded "Product & history" section expanded when the source briefly
+  reports itself unavailable. An unavailable source reports no items, and the
+  pruning that keeps that set from growing treated it as a removal, collapsing
+  what the household had open for the next poll.
+- Keep pricing backoff when the source is briefly unavailable, for the same
+  reason. An unavailable source reports no items, so treating that as a removal
+  cleared the retry timer for every item and immediately retried lookups that
+  had just failed.
+
+Both are the same mistake in two places: an unavailable source is not an empty
+list. Only an available source is treated as authoritative now, matching the
+fix 0.8.10 made for stored section corrections.
+
 ## 0.8.10
 
 - Release the source subscription when setup fails. `async_setup` subscribes to

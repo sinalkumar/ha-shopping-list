@@ -348,3 +348,19 @@ test("a genuinely empty list still says so", async (t) => {
   await card._load();
   assert.match(card.shadowRoot.textContent, /shopping list is empty/);
 });
+
+test("a transient unavailable blip keeps expanded rows expanded", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.items[0].history = [{ ts: Date.now() / 1000, price: 4 }]; await card._load();
+  const details = card.shadowRoot.querySelector("details");
+  details.open = true;
+  details.dispatchEvent(new card.ownerDocument.defaultView.Event("toggle"));
+  // The source goes away for one poll: it reports no items.
+  const saved = data.items;
+  data.available = false; data.can_control = false; data.items = [];
+  await card._load();
+  data.available = true; data.can_control = true; data.items = saved;
+  await card._load();
+  assert.equal(card.shadowRoot.querySelector("details").open, true,
+    "an unavailable blip must not forget what the household had open");
+});
