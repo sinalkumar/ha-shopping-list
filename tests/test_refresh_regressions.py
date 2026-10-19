@@ -134,7 +134,7 @@ def test_item_added_while_pricing_is_queued(monkeypatch):
 
 # --- weekly rollover --------------------------------------------------------
 # Both chains publish the new week's prices in the early hours of Monday NZ
-# time, so a 12-hour interval can be half a day late on exactly the morning the
+# time, so the interval alone can be hours late on exactly the morning the
 # whole list changes price.
 
 MONDAY_6AM = dt.datetime(2026, 10, 19, 6, 0, tzinfo=dt.UTC)
@@ -183,7 +183,7 @@ def test_weekly_rollover_runs_on_monday_only(monkeypatch, weekday):
     assert len(calls) == (1 if weekday == 0 else 0)
     if weekday == 0:
         # grocer.nz history is what makes a Pak'nSave special visible, so the
-        # mirror must not wait for its own 12-hour timer.
+        # mirror must not wait for its own slow timer.
         coordinator.async_sync_grocer.assert_awaited_once_with(force=True)
     else:
         coordinator.async_sync_grocer.assert_not_awaited()

@@ -39,6 +39,7 @@ from .const import (
     PRICE_HISTORY_MIN_INTERVAL,
     PRICE_PIN_MAX,
     PRICE_REFRESH_HOURS,
+    PRICE_STALE_AFTER_HOURS,
     PRICE_WEEKLY_REFRESH_HOUR,
     PRICE_WEEKLY_REFRESH_WEEKDAY,
 )
@@ -82,11 +83,17 @@ class PriceSnapshot:
         return sum(self.active.values())
 
     def stale_for(self, key: str) -> bool:
+        """Whether a quote is too old to present as current.
+
+        Uses its own threshold rather than the refresh interval, so a single
+        failed cycle cannot mark every row STALE.
+        """
+
         observed = self.observed_at.get(key)
         return (
             key in self.errors
             or observed is None
-            or time.time() - observed > PRICE_REFRESH_HOURS * 3600 + 300
+            or time.time() - observed > PRICE_STALE_AFTER_HOURS * 3600
         )
 
     @property

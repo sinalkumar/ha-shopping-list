@@ -28,8 +28,14 @@ PRICE_STORAGE_KEY_PREFIX = f"{DOMAIN}.prices"
 STORAGE_SAVE_DELAY = 5
 MAX_CACHE_ENTRIES = 2000
 
-# Prices refresh slowly and politely; the route never waits for them.
-PRICE_REFRESH_HOURS = 12
+# Prices refresh slowly and politely; the route never waits for them. Each
+# interval re-prices the whole list, so this is also the retailer request rate:
+# every cycle is one lookup per distinct item.
+PRICE_REFRESH_HOURS = 3
+# How long a quote stays usable for display. Deliberately longer than the
+# interval: one missed or failed cycle must not relabel the whole basket as
+# STALE, which is what tying this to PRICE_REFRESH_HOURS would do.
+PRICE_STALE_AFTER_HOURS = 24
 # Both chains publish the new week's prices between Sunday morning and Monday
 # 05:00 NZ time: 93% of Pak'nSave and 98% of Woolworths price changes observed in
 # 2026 land on a Monday, and grocer.nz records them at 05:00. The interval alone
@@ -44,7 +50,9 @@ PRICE_HISTORY_MAX = 500
 # Observations kept per item. Changes are always recorded; unchanged readings are
 # sampled so a long-running profile keeps a usable series without growing.
 PRICE_HISTORY_MAX_POINTS = 60
-PRICE_HISTORY_MIN_INTERVAL = 6 * 3600
+# Sampling interval for an unchanged price. Kept at half a day so the bounded
+# series still spans weeks rather than days now that the interval is shorter.
+PRICE_HISTORY_MIN_INTERVAL = 12 * 3600
 
 # grocer.nz mirror. History is the only source of Pak'nSave reference prices, so
 # it is kept on disk and refreshed slowly rather than fetched on demand.

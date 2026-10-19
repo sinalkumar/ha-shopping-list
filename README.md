@@ -151,7 +151,9 @@ Two sensors are added:
 - **Specials**: retailer-reference specials and recent same-product price drops,
   with item details in attributes. Stale observations do not claim current savings.
 
-Prices refresh every 12 hours on their own schedule, and each item is priced once and then reused, so adding one item does not re-price the list. Pricing never blocks the route: a slow or failing retailer leaves the list working, and a failed lookup backs off instead of retrying every cycle.
+Prices refresh every 3 hours on their own schedule, which re-prices the whole list: one lookup per distinct item per cycle, so a 13-item list is 13 requests every 3 hours. Adding one item does not trigger that, because a known quote is reused until the next cycle. Pricing never blocks the route: a slow or failing retailer leaves the list working, and a failed lookup backs off instead of retrying every cycle.
+
+A quote stays presentable for 24 hours, which is deliberately longer than the refresh interval: a single missed or failed cycle leaves the prices on screen instead of relabelling the whole basket as stale.
 
 Both chains publish the new week's prices between Sunday morning and Monday 05:00 NZ time, so the list is also re-priced at 06:00 every Monday. That single refresh re-prices everything and re-syncs the grocer.nz mirror, so a Monday shop is priced against the week it is actually being done in rather than the one before it.
 

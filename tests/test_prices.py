@@ -7,6 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 import smart_shopping_route.price_coordinator as price_coordinator
+from smart_shopping_route.const import (
+    PRICE_REFRESH_HOURS,
+    PRICE_STALE_AFTER_HOURS,
+)
 from smart_shopping_route.prices import (
     CHAIN_PAKNSAVE,
     CHAIN_WOOLWORTHS,
@@ -625,7 +629,7 @@ def test_previous_price_records_the_old_value(monkeypatch) -> None:
 
 
 def test_setup_registers_an_interval_listener(monkeypatch) -> None:
-    """Without a listener the 12-hour refresh never runs."""
+    """Without a listener the interval refresh never runs."""
 
     monkeypatch.setattr(
         price_coordinator, "create_client", lambda *_a, **_k: SimpleNamespace()
@@ -1120,7 +1124,7 @@ def test_a_request_during_a_refresh_runs_again_afterwards() -> None:
 
 
 def test_the_real_interval_path_reprices_and_notifies() -> None:
-    """The scheduled 12-hour path must re-price AND re-render entities.
+    """The scheduled interval path must re-price AND re-render entities.
 
     It calls the framework's private refresh, bypassing both our public
     async_refresh and RouteCoordinator's notification helper, so this covers the
@@ -1163,7 +1167,7 @@ def test_the_real_interval_path_reprices_and_notifies() -> None:
 
 
 def test_interval_refresh_notifies_entities() -> None:
-    """The 12-hour interval must re-render entities, not just update the snapshot.
+    """The interval must re-render entities, not just update the snapshot.
 
     It bypasses the route coordinator's own notification path, so without the
     listener forwarding, price sensors and item descriptions stay stale.
@@ -1923,3 +1927,22 @@ def test_a_qualifier_variant_below_the_first_eight_hits_is_still_found() -> None
     assert result.price == 3.49
     search = next(c for c in client._session.calls if "products" in c["url"])
     assert search["json"]["hitsPerPage"] == SEARCH_PAGE_SIZE
+
+
+def test_a_missed_cycle_does_not_make_the_basket_stale(monkeypatch) -> None:
+    """Staleness must outlive the interval, or one hiccup relabels every row."""
+
+    coordinator, _calls = make_price_coordinator(monkeypatch, ["Milk"], {})
+    snapshot = coordinator.snapshot
+    snapshot.quotes["milk"] = quote("Milk 2L", 4.0)
+    snapshot.active = {"milk": 1}
+
+    # Longer than one interval, still well inside the display threshold.
+    snapshot.observed_at["milk"] = time.time() - (PRICE_REFRESH_HOURS * 3600 + 60)
+    assert PRICE_STALE_AFTER_HOURS > PRICE_REFRESH_HOURS
+    assert not snapshot.stale_for("milk")
+    assert snapshot.stale_count == 0
+
+    snapshot.observed_at["milk"] = time.time() - (PRICE_STALE_AFTER_HOURS * 3600 + 60)
+    assert snapshot.stale_for("milk")
+    assert snapshot.stale_count == 1

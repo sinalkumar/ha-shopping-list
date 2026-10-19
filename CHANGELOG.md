@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.6
+
+- Re-price the list every 3 hours instead of every 12. Each chain publishes
+  new prices roughly weekly, so this mostly shortens how long a mid-week
+  change or a missed match stays wrong. It costs four times the retailer
+  requests: one lookup per distinct item per cycle.
+- Give staleness its own 24-hour threshold instead of deriving it from the
+  refresh interval. With the two coupled, a single missed cycle would have
+  marked every row `STALE — refresh prices`.
+- Sample unchanged prices every 12 hours rather than every 6, so the bounded
+  per-item series still spans weeks at the shorter interval.
+
 ## 0.8.5
 
 - Re-price the whole list at 06:00 every Monday, and force the grocer.nz mirror

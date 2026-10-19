@@ -52,7 +52,7 @@ class RouteCoordinator:
         self.store = async_get_store(hass, entry.entry_id)
         self.prices = PriceCoordinator(hass, entry, summaries=self._priced_summaries)
         # Every completed price update must reach entities, including the ones
-        # the 12-hour interval performs: the interval bypasses this
+        # the interval performs: the interval bypasses this
         # coordinator's own notification path.
         self.prices.async_set_update_callback(self.async_notify_prices)
         self.cache = ClassificationCache()
