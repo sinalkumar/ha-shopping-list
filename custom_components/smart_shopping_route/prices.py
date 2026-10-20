@@ -520,8 +520,14 @@ def alternatives(
 
     Only candidates that satisfy the same hard constraints as a match are
     offered, so this never suggests a different pack size or a ruled-out
-    variant. Quotes whose size is unknown cannot be compared by value and are
-    left out rather than guessed at.
+    variant. They must also be the same thing: a pack size alone does not make
+    a product a substitute, or "Tuna 185g (olive oil)" would be offered Lemon
+    Pepper and Sweet Thai Chilli -- the flavours its own qualifier excludes --
+    and an unpriced vitamin would be offered unrelated gummies that happen to
+    be 100pk. The relevance floor is the same one a match must clear.
+
+    Quotes whose size is unknown cannot be compared by value and are left out
+    rather than guessed at.
     """
 
     if size_from_text(summary) is None:
@@ -537,6 +543,8 @@ def alternatives(
         ):
             continue
         if candidate.unit_cost is None:
+            continue
+        if match_score(summary, candidate.product_name) < MIN_MATCH_SCORE:
             continue
         seen.add(candidate.product_id)
         priced.append(candidate)
@@ -646,16 +654,26 @@ class PriceClient:
         variant.
         """
 
+        def matched(
+            match: PriceQuote | None, pool: list[PriceQuote]
+        ) -> PriceQuote | None:
+            # The alternatives answer the question the match does not: whether
+            # the product that won on relevance was also the best value on that
+            # shelf. They are collected from the same pool the match came from,
+            # so the two can never disagree about what was on offer.
+            if alternatives_out is not None and match is not None:
+                alternatives_out.extend(alternatives(summary, pool))
+            return match
+
         if pin is not None and pin.product_id:
-            return self._exact(
-                await self.async_candidates(self._pin_term(pin, summary)), pin
-            )
+            pinned = await self.async_candidates(self._pin_term(pin, summary))
+            return matched(self._exact(pinned, pin), pinned)
 
         target = pin.match_target if pin and pin.match_target else summary
         candidates = await self.async_candidates(self._pin_term(pin, summary))
         match = best_match(target, candidates)
         if match is not None:
-            return match
+            return matched(match, candidates)
         if pin is not None and pin.match_target:
             return None
         # Each retry widens the query rather than the answer: the qualifier is
@@ -673,7 +691,7 @@ class PriceClient:
             candidates = candidates + await self.async_candidates(retry)
             match = best_match(summary, candidates)
             if match is not None:
-                return match
+                return matched(match, candidates)
         if alternatives_out is not None:
             alternatives_out.extend(alternatives(summary, candidates))
         if ranker is None:

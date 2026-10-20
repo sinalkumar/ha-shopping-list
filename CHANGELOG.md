@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.16
+
+- Actually show the alternatives on a priced row. They were collected only when
+  scoring found nothing, so every matched item -- the whole point of the line --
+  went without one. They are now taken from the same candidate pool the match
+  came from, on every path including the retries.
+- Only offer products that are the same thing. A pack size alone is not a
+  substitute: "Tuna 185g (olive oil)" was offered Lemon Pepper and Sweet Thai
+  Chilli at the same price, and an unpriced vitamin was offered unrelated 100pk
+  gummies. Alternatives now clear the same relevance floor as a match.
+- Keep the chosen product in the ranking but stop naming it twice. It shows as
+  "$3.90 · 185g · $21.08/kg (this item)" in the position its value earns, so a
+  dearer pick cannot look like the cheapest option on the shelf.
+
 ## 0.8.15
 
 - Show the better-value alternatives beside a matched product. The row gains a

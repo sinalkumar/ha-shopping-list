@@ -502,10 +502,58 @@ def test_a_priced_item_lists_better_value_alternatives() -> None:
     assert (
         visible[0] == "$19.99 · 100pk · $0.20/ea · Centrum Advance Adults 100 Tablets"
     )
+    # The pick stays in the ranking so a shopper can see where it sits, but it is
+    # not named twice: the line above already carries the product.
+    assert visible[1] == (
+        "Alternatives by unit price: "
+        "$19.99 · 100pk · $0.20/ea (this item) | "
+        "$24.99 · 100pk · $0.25/ea Centrum Advance Adult 100 Tablets"
+    )
+
+
+def test_the_chosen_product_is_shown_where_it_ranks_by_value() -> None:
+    """A dearer pick must not look like the cheapest option on the shelf."""
+
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features |= int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+    chosen = PriceQuote(
+        "paknsave",
+        "p2",
+        "Centrum Advance Adult 100 Tablets",
+        24.99,
+        size="100pk",
+        unit_price="$0.25/ea",
+    )
+    coordinator.prices = FakePrices(
+        {"Milk": chosen},
+        alternatives={
+            "Milk": [
+                PriceQuote(
+                    "paknsave",
+                    "p1",
+                    "Centrum Advance Adults 100 Tablets",
+                    19.99,
+                    size="100pk",
+                    unit_price="$0.20/ea",
+                ),
+                chosen,
+            ]
+        },
+    )
+
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+    visible = [
+        line
+        for line in displayed.description.splitlines()
+        if not line.startswith("<!-- ssr-price:")
+    ]
+
     assert visible[1] == (
         "Alternatives by unit price: "
         "$19.99 · 100pk · $0.20/ea Centrum Advance Adults 100 Tablets | "
-        "$24.99 · 100pk · $0.25/ea Centrum Advance Adult 100 Tablets"
+        "$24.99 · 100pk · $0.25/ea (this item)"
     )
 
 

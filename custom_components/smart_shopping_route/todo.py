@@ -135,7 +135,7 @@ class SmartShoppingRouteTodo(TodoListEntity):
                 # machine-checkable and invisible in the list, and edits to the
                 # price are still rejected with an explanation of what to
                 # change. The digest rides in the opening comment and is kept
-                # short so the block stays three lines in Home Assistant's own
+                # short so the block stays compact in Home Assistant's own
                 # plain-text editor, where the comments are visible.
                 checksum = sha256(price.encode()).hexdigest()[:PRICE_BLOCK_DIGEST_CHARS]
                 item.description = (
@@ -195,6 +195,10 @@ class SmartShoppingRouteTodo(TodoListEntity):
         shopper actually asks, which is whether the same thing is cheaper in
         another brand or pack. Only products that satisfy the same constraints
         are listed, so nothing here is a different size or a ruled-out variant.
+
+        The match itself stays in the ranking, because where it sits is the
+        answer -- it is not shown again by name, since the line above already
+        carries it.
         """
 
         options = self.coordinator.prices.alternatives_for(summary)
@@ -207,7 +211,10 @@ class SmartShoppingRouteTodo(TodoListEntity):
                 for part in (f"${option.price:.2f}", option.size, option.unit_price)
                 if part
             )
-            rendered.append(f"{detail} {option.product_name}")
+            if option.product_id == quote.product_id:
+                rendered.append(f"{detail} (this item)")
+            else:
+                rendered.append(f"{detail} {option.product_name}")
         return "Alternatives by unit price: " + " | ".join(rendered)
 
     async def async_added_to_hass(self) -> None:

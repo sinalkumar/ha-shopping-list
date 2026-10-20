@@ -2632,3 +2632,106 @@ def test_without_a_pack_size_the_retailer_order_still_decides() -> None:
 
     assert best is not None
     assert "Punnet" in best.product_name
+
+
+def test_a_matched_item_reports_its_alternatives() -> None:
+    """A priced row must carry the comparison, not just an unpriced one.
+
+    The match is chosen for relevance, so the alternatives are the only place a
+    shopper learns whether the pick was also the best value. Collecting them
+    only when scoring failed left every priced row without one.
+    """
+
+    client = WoolworthsPriceClient(SimpleNamespace())
+    shelf = [
+        priced("Centrum Advance Adult 100 Tablets", 24.99, "100pk"),
+        priced("Centrum Advance Adults 100 Tablets", 19.99, "100pk"),
+        priced("Centrum Advance Adult Multivitamin 100 Tablets", 29.99, "100pk"),
+    ]
+
+    async def candidates(_term):
+        return list(shelf)
+
+    client.async_candidates = candidates  # type: ignore[method-assign]
+    found: list[PriceQuote] = []
+
+    result = asyncio.run(
+        client.async_lookup(
+            "Centrum advance Adult 100pk (not 50+)", alternatives_out=found
+        )
+    )
+
+    assert result is not None
+    assert [option.product_id for option in found] == [
+        "Centrum Advance Adults 100 Tablets",
+        "Centrum Advance Adult 100 Tablets",
+        "Centrum Advance Adult Multivitamin 100 Tablets",
+    ]
+
+
+def test_a_matched_item_reports_alternatives_after_a_retry() -> None:
+    """A match found by the looser query still reports what that query saw."""
+
+    client = WoolworthsPriceClient(SimpleNamespace())
+    seen: list[str] = []
+
+    async def candidates(term):
+        seen.append(term)
+        if term == "Centrum advance Adult 100pk":
+            return []
+        return [priced("Centrum Advance Adults 100 Tablets", 19.99, "100pk")]
+
+    client.async_candidates = candidates  # type: ignore[method-assign]
+    found: list[PriceQuote] = []
+
+    result = asyncio.run(
+        client.async_lookup(
+            "Centrum advance Adult 100pk (not 50+)", alternatives_out=found
+        )
+    )
+
+    assert result is not None
+    assert len(seen) > 1
+    assert [option.product_id for option in found] == [
+        "Centrum Advance Adults 100 Tablets"
+    ]
+
+
+def test_alternatives_are_only_products_that_are_the_same_thing() -> None:
+    """A pack size is not a substitute: the qualifier has to match too.
+
+    "Tuna 185g (olive oil)" sits beside Lemon Pepper and Sweet Thai Chilli on the
+    same shelf at the same price. Offering them as cheaper alternatives would
+    recommend exactly the flavours the item ruled out.
+    """
+
+    options = alternatives(
+        "Tuna 185g (olive oil)",
+        [
+            priced("Pams Lemon Pepper Tuna", 2.39, "185g"),
+            priced("Pams Sweet Thai Chilli Tuna", 2.39, "185g"),
+            priced("Pams Tuna Chunks In Olive Oil Blend", 2.39, "185g"),
+        ],
+    )
+
+    assert [option.product_id for option in options] == [
+        "Pams Tuna Chunks In Olive Oil Blend"
+    ]
+
+
+def test_an_unpriced_item_gets_no_alternatives_from_another_family() -> None:
+    """Nothing matched, so a 100-pack of gummies is not a substitute vitamin."""
+
+    options = alternatives(
+        "Centrum advance Adult 100pk (not 50+)",
+        [
+            priced(
+                "Natures Way Women's Multivitamin Adult Vita Gummies", 17.49, "100pk"
+            ),
+            priced("Centrum Advance Adults 100 Tablets", 33.99, "100pk"),
+        ],
+    )
+
+    assert [option.product_id for option in options] == [
+        "Centrum Advance Adults 100 Tablets"
+    ]
