@@ -25,10 +25,14 @@ from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+from .ai_match import AIMatchRanker
 from .const import (
+    CONF_AI_MATCH,
+    CONF_AI_TASK_ENTITY_ID,
     CONF_GROCER_STORE_ID,
     CONF_PRICE_CHAIN,
     CONF_PRICE_STORE_ID,
+    DEFAULT_AI_MATCH,
     DOMAIN,
     GROCER_HISTORY_FILE_MAX,
     GROCER_STORE_REFRESH_HOURS,
@@ -260,6 +264,9 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         # drop every quote, store history and product match we paid to collect.
         self._authoritative = authoritative or (lambda: True)
         self._client: PriceClient | None = None
+        # An AI tie-break is only built when the profile opted in and named an
+        # AI Task. Left None, the lookup is exactly the deterministic one.
+        self._ranker: AIMatchRanker | None = None
         self._snapshot = PriceSnapshot()
         self._attempts: dict[str, int] = {}
         self._backoff_until: dict[str, float] = {}
@@ -489,6 +496,22 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "Imported %s historical price point(s) for one item", len(imported)
         )
 
+    def _build_ranker(self) -> AIMatchRanker | None:
+        """Return the AI tie-break this profile asked for, if any."""
+
+        if not self.ai_match_enabled:
+            return None
+        return AIMatchRanker(self.hass, self.entry.data[CONF_AI_TASK_ENTITY_ID])
+
+    @property
+    def ai_match_enabled(self) -> bool:
+        """True when this profile asked for an AI tie-break and can supply one."""
+
+        return bool(
+            self.entry.data.get(CONF_AI_MATCH, DEFAULT_AI_MATCH)
+            and self.entry.data.get(CONF_AI_TASK_ENTITY_ID)
+        )
+
     @property
     def _chain_key(self) -> str:
         """Chain identity used for pin comparison, normalised once."""
@@ -512,6 +535,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             return
         if self._client is None:
             return
+        self._ranker = self._build_ranker()
         # DataUpdateCoordinator only schedules its interval once it has a
         # listener, so without this the 12-hour refresh would never run. The
         # listener also forwards every completed update to entities: the
@@ -997,8 +1021,16 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         assert self._client is not None
         version = self._pin_versions.get(key, 0)
         try:
+            pin = self._pins.get(key)
             async with self._semaphore:
-                quote = await self._client.async_lookup(summary, self._pins.get(key))
+                # Only the AI-enabled path uses the extended signature, so the
+                # ordinary lookup stays a two-argument call.
+                if self._ranker is None:
+                    quote = await self._client.async_lookup(summary, pin)
+                else:
+                    quote = await self._client.async_lookup(
+                        summary, pin, ranker=self._ranker.async_pick
+                    )
         except PriceError:
             if self._closed or version != self._pin_versions.get(key, 0):
                 return
@@ -1021,17 +1053,48 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         if quote is None:
             # No confident match. Remember that so the item is not searched on
             # every cycle, but keep it retryable in case the item is renamed.
+            # An automatic pin that no longer resolves is a stale answer, not a
+            # decision: drop it so the next cycle can match afresh instead of
+            # leaving the item unpriced until someone notices.
             self._snapshot.failed.add(key)
             self._snapshot.quotes.pop(key, None)
             self._snapshot.observed_at.pop(key, None)
             self._snapshot.drops_now.pop(key, None)
+            pin = self._pins.get(key)
+            if pin is not None and pin.is_auto:
+                del self._pins[key]
+                self._pin_versions[key] = version + 1
+                self._attempts.pop(key, None)
+                self._backoff_until.pop(key, None)
+                await self._async_persist()
+                return
             self._schedule_retry(key)
             return
         self._snapshot.failed.discard(key)
+        # Remember an AI tie-break so the choice cannot flip between refreshes.
+        # A flip would rewrite the price series on every cycle, which is exactly
+        # the history the drop detection is built on.
+        if self._ranker is not None and self._pins.get(key) is None:
+            await self._remember_auto_pin(key, summary, quote)
         self._record_history(key, quote)
         self._snapshot.quotes[key] = quote
         self._snapshot.observed_at[key] = time.time()
         await self._async_backfill(key, quote)
+
+    async def _remember_auto_pin(
+        self, key: str, summary: str, quote: PriceQuote
+    ) -> None:
+        """Cache a tie-break result so the same answer is used from now on."""
+
+        self._trim_pins()
+        self._pins[key] = ProductPin(
+            chain=self._chain_key,
+            query=summary,
+            product_id=quote.product_id,
+            product_name=quote.product_name,
+            source="auto",
+        )
+        await self._async_persist()
 
     def _record_history(self, key: str, quote: PriceQuote) -> None:
         """Append an observation, then derive the drop from the series.
@@ -1121,6 +1184,10 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "unmatched_items": self._snapshot.unmatched_count,
             "scheduled_retries": len(self._backoff_until),
             "pinned_items": len(self._pins),
+            # Support question worth answering without a config dive: is the AI
+            # tie-break on, and how many decisions is it caching?
+            "ai_match": self.ai_match_enabled,
+            "automatic_pins": sum(1 for pin in self._pins.values() if pin.is_auto),
             "items_with_history": len(self._snapshot.history),
             "grocer_history": self.history_enabled,
             "grocer_mirror_bytes": (

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.13
+
+- Stop a rule-out from voting for the product it rules out. "Centrum advance
+  Adult 100pk (not 50+)" scored *higher* for the 50+ formulation than for the
+  plain adult one, because `not` counted as content and `50` counted as a match.
+  A negated quantity is now a hard exclusion, and the words that express it no
+  longer take part in scoring.
+- Keep a trailing `+` in the token, so `50+` and `50` are different products.
+- Stop counting the pack size in the similarity score. `best_match()` already
+  enforces it exactly, so counting it again only diluted the score: a size
+  printed on the pack rather than in the title pushed correct matches below the
+  threshold while wrong variants stayed above it.
+- Add an optional AI tie-break for the items scoring genuinely cannot separate.
+  It only ever sees candidates that already passed the hard constraints, may
+  only answer with one of them or "none", and its answer is remembered as an
+  automatic pin so a price cannot flip between refreshes and rewrite the price
+  history. Off by default: it sends item and product names to the configured AI
+  provider, which the anonymous retailer lookups never do. A profile that
+  cannot resolve an automatic pin drops it and matches afresh.
+
 ## 0.8.12
 
 - Stop an unavailable source from emptying the route. The card and the price

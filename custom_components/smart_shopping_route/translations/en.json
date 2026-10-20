@@ -14,14 +14,16 @@
           "display_section_prefix": "Prefix item names with their section",
           "price_chain": "Price source",
           "price_store_id": "Current-price store (Pak'nSave)",
-          "grocer_store_id": "Price-history store (grocer.nz)"
+          "grocer_store_id": "Price-history store (grocer.nz)",
+          "ai_match": "Ask the AI Task to choose when two products are equally close"
         },
         "data_description": {
           "sections": "One section per line: SECTION NAME | optional hints. Line order is the walking route.",
           "display_section_prefix": "Only changes how the calculated list is displayed. The source list is never renamed.",
           "price_chain": "Optional. Sends each item name or pinned query to the chosen retailer's anonymous product search. Choose no prices to send names only to the AI Task.",
           "price_store_id": "Pak'nSave: enter the exact store name or retailer ID. The name is resolved and saved for the shopping card. Leave blank for Woolworths: its online prices are not store-specific.",
-          "grocer_store_id": "Optional named public store for historical observations. Must match the retailer and, for Pak'nSave, the current-price store. Woolworths history is store-specific but its current online quote is not. New stores may require an integration update. No imported history keeps local observations only."
+          "grocer_store_id": "Optional named public store for historical observations. Must match the retailer and, for Pak'nSave, the current-price store. Woolworths history is store-specific but its current online quote is not. New stores may require an integration update. No imported history keeps local observations only.",
+          "ai_match": "Sends the item name and the closest product names to your AI provider when the price search cannot tell two products apart. The answer is remembered so a price never flips between refreshes."
         }
       },
       "reconfigure": {
@@ -36,14 +38,16 @@
           "display_section_prefix": "Prefix item names with their section",
           "price_chain": "Price source",
           "price_store_id": "Current-price store (Pak'nSave)",
-          "grocer_store_id": "Price-history store (grocer.nz)"
+          "grocer_store_id": "Price-history store (grocer.nz)",
+          "ai_match": "Ask the AI Task to choose when two products are equally close"
         },
         "data_description": {
           "sections": "One section per line: SECTION NAME | optional hints. Line order is the walking route.",
           "display_section_prefix": "Only changes how the calculated list is displayed. The source list is never renamed.",
           "price_chain": "Optional. Sends each item name or pinned query to the chosen retailer's anonymous product search. Choose no prices to send names only to the AI Task.",
           "price_store_id": "Pak'nSave: enter the exact store name or retailer ID. The name is resolved and saved for the shopping card. Leave blank for Woolworths: its online prices are not store-specific.",
-          "grocer_store_id": "Optional named public store for historical observations. Must match the retailer and, for Pak'nSave, the current-price store. Woolworths history is store-specific but its current online quote is not. New stores may require an integration update. No imported history keeps local observations only."
+          "grocer_store_id": "Optional named public store for historical observations. Must match the retailer and, for Pak'nSave, the current-price store. Woolworths history is store-specific but its current online quote is not. New stores may require an integration update. No imported history keeps local observations only.",
+          "ai_match": "Sends the item name and the closest product names to your AI provider when the price search cannot tell two products apart. The answer is remembered so a price never flips between refreshes."
         }
       }
     },

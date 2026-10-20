@@ -73,6 +73,10 @@ GROCER_STORE_REFRESH_HOURS = 12
 # Bound the mirror so history is kept indefinitely without unbounded growth.
 GROCER_HISTORY_FILE_MAX = 400
 CONF_GROCER_STORE_ID = "grocer_store_id"
+# Off by default: an AI tie-break sends item and product names to the
+# configured provider, which the anonymous retailer lookups never do.
+CONF_AI_MATCH = "ai_match"
+DEFAULT_AI_MATCH = False
 # Pins outlive their item by design, so they need their own ceiling.
 PRICE_PIN_MAX = 200
 

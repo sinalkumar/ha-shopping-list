@@ -15,6 +15,7 @@ import logging
 import math
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from difflib import SequenceMatcher
@@ -25,6 +26,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 _LOGGER = logging.getLogger(__name__)
+
+# An optional tie-break offered the shortlist when scoring finds nothing.
+Ranker = Callable[[str, list["PriceQuote"]], Awaitable["PriceQuote | None"]]
 
 CHAIN_WOOLWORTHS = "woolworths"
 CHAIN_PAKNSAVE = "paknsave"
@@ -43,6 +47,10 @@ TOKEN_MIN_LENGTH = 4
 # the cut: "Tuna 185g" buries "Sealord Olive Oil Blend Tuna 185g" at position
 # 12, so the item matched nothing at all. One request of 20 keeps them.
 SEARCH_PAGE_SIZE = 20
+# How many candidates an AI tie-break may be shown. Enough to cover the real
+# variants of one product, small enough that the request stays cheap and the
+# answer stays a choice rather than a search.
+AI_SHORTLIST_MAX = 12
 
 _BROWSER_HEADERS = {
     "User-Agent": (
@@ -57,8 +65,14 @@ _SYNONYMS = {
     "paper": {"tissue"},
     "tissue": {"paper"},
 }
-_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+# A trailing "+" is part of the token, not punctuation: "50+" is an age
+# formulation and "50" is a quantity, so collapsing them together loses the
+# only thing that tells the two Centrum products apart.
+_WORD_RE = re.compile(r"[^\W_]+\+?", re.UNICODE)
 _PAREN_RE = re.compile(r"\([^)]*\)")
+# Words that rule something out. Only a negated *quantity* is treated as an
+# exclusion; see excluded_tokens().
+_EXCLUDE_WORDS = frozenset({"not", "no", "without", "except", "minus"})
 
 WOOLWORTHS_URL = "https://www.woolworths.co.nz/api/graphql"
 PAKNSAVE_TOKEN_URL = "https://www.paknsave.co.nz/api/user/get-current-user"
@@ -93,6 +107,14 @@ class ProductPin:
     # grocer.nz product id, used only for price history. Set it when automatic
     # matching picks a sibling variant, which slugs cannot distinguish.
     grocer_product_id: int | None = None
+    # "user" for a decision the household made, "auto" when an AI tie-break
+    # settled an ambiguity. An automatic pin is a cached answer, so it may be
+    # replaced or dropped when the shop changes; a user pin never is.
+    source: str = "user"
+
+    @property
+    def is_auto(self) -> bool:
+        return self.source == "auto"
 
     @property
     def match_target(self) -> str:
@@ -107,6 +129,7 @@ class ProductPin:
             "product_id": self.product_id,
             "product_name": self.product_name,
             "grocer_product_id": self.grocer_product_id,
+            "source": self.source,
         }
 
     @classmethod
@@ -123,6 +146,7 @@ class ProductPin:
                 if data.get("grocer_product_id")
                 else None
             ),
+            source="auto" if data.get("source") == "auto" else "user",
         )
 
 
@@ -304,12 +328,72 @@ def _same_word(left: str, right: str) -> bool:
     return SequenceMatcher(None, left, right).ratio() >= TOKEN_SIMILARITY
 
 
+def _size_tokens(summary: str) -> set[str]:
+    """Tokens that spell out the pack size, e.g. {"8", "x", "270sheets"}."""
+
+    size = size_from_text(summary)
+    return set(_tokens(size[0])) if size else set()
+
+
+def _negation_pairs(summary: str) -> list[tuple[str, str]]:
+    """(negation word, ruled-out quantity) pairs, e.g. ("not", "50+")."""
+
+    tokens = _tokens(summary)
+    return [
+        (token, tokens[index + 1])
+        for index, token in enumerate(tokens[:-1])
+        if token in _EXCLUDE_WORDS and any(ch.isdigit() for ch in tokens[index + 1])
+    ]
+
+
+def excluded_tokens(summary: str) -> set[str]:
+    """Quantities the item explicitly rules out.
+
+    "Centrum advance Adult 100pk (not 50+)" is a different product from the
+    50+ formulation, and no similarity score can express "not": the word was
+    counted as content, so writing it down voted for the wrong product. A
+    negated word that carries a number is therefore a hard exclusion, because a
+    pack size or an age formulation cannot be both. A negated word without a
+    number ("no added sugar") is left to normal scoring, since retailer names
+    state it positively and excluding it would discard the wanted product.
+    """
+
+    return {right for _left, right in _negation_pairs(summary)}
+
+
+def _is_excluded(token: str, excluded: set[str]) -> bool:
+    """True when a candidate token contradicts an excluded quantity.
+
+    The trailing "+" is ignored here: "not 50" and "not 50+" both rule out the
+    50+ formulation, so the exclusion must not depend on how it was typed.
+    """
+
+    bare = token.rstrip("+")
+    return any(bare == other.rstrip("+") for other in excluded)
+
+
 def match_score(summary: str, candidate: str) -> float:
-    """Return the share of the item's words present in a candidate name."""
+    """Return the share of the item's words present in a candidate name.
+
+    The pack size is left out of the share. best_match() already enforces it
+    exactly, so counting it again only diluted the score: "100pk" is written on
+    the pack, not in the product title, which pushed a correct match below the
+    threshold while a wrong variant stayed above it.
+    """
 
     item_tokens = _tokens(summary)
     if not item_tokens:
         return 0.0
+    # A ruled-out quantity and the word that rules it out are instructions, not
+    # product words: keeping them in the share let "not 50+" dilute the score
+    # and, worse, count "50" as matched against the product it excluded.
+    ignored = _size_tokens(summary)
+    for negation, quantity in _negation_pairs(summary):
+        ignored.add(negation)
+        ignored.add(quantity)
+    content = [token for token in item_tokens if token not in ignored]
+    if content:
+        item_tokens = content
     candidate_tokens = _tokens(candidate)
     matched = 0
     for token in item_tokens:
@@ -354,21 +438,59 @@ def best_match(summary: str, candidates: list[PriceQuote]) -> PriceQuote | None:
 
     best: PriceQuote | None = None
     best_score = 0.0
+    excluded = excluded_tokens(summary)
     for candidate in candidates:
-        score = match_score(summary, candidate.product_name)
-        wanted_size = size_from_text(summary)
-        candidate_size = size_from_text(candidate.size or candidate.product_name)
-        if wanted_size and (
-            not candidate_size
-            or wanted_size[2] != candidate_size[2]
-            or not math.isclose(wanted_size[1], candidate_size[1], rel_tol=1e-6)
-        ):
+        if not _acceptable(summary, candidate, excluded):
             continue
+        score = match_score(summary, candidate.product_name)
         if score < MIN_MATCH_SCORE or score <= best_score:
             continue
         best_score = score
         best = replace(candidate, score=score)
     return best
+
+
+def _acceptable(
+    summary: str, candidate: PriceQuote, excluded: set[str] | None = None
+) -> bool:
+    """Apply the constraints a similarity score must never override."""
+
+    wanted_size = size_from_text(summary)
+    candidate_size = size_from_text(candidate.size or candidate.product_name)
+    if wanted_size and (
+        not candidate_size
+        or wanted_size[2] != candidate_size[2]
+        or not math.isclose(wanted_size[1], candidate_size[1], rel_tol=1e-6)
+    ):
+        return False
+    if excluded is None:
+        excluded = excluded_tokens(summary)
+    if excluded:
+        written = _tokens(candidate.product_name) + _tokens(candidate.size or "")
+        if any(_is_excluded(token, excluded) for token in written):
+            return False
+    return True
+
+
+def shortlist(
+    summary: str, candidates: list[PriceQuote], limit: int = AI_SHORTLIST_MAX
+) -> list[PriceQuote]:
+    """Rank the candidates a reviewer (human or model) should see.
+
+    Only candidates that already satisfy the hard constraints are offered, so a
+    tie-break can choose between real options but cannot smuggle in a wrong pack
+    size or a ruled-out variant. Retailer relevance order survives equal scores
+    because the sort is stable.
+    """
+
+    excluded = excluded_tokens(summary)
+    scored = [
+        (match_score(summary, candidate.product_name), candidate)
+        for candidate in candidates
+        if _acceptable(summary, candidate, excluded)
+    ]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [replace(candidate, score=score) for score, candidate in scored[:limit]]
 
 
 class PriceClient:
@@ -400,7 +522,11 @@ class PriceClient:
         raise NotImplementedError
 
     async def async_lookup(
-        self, summary: str, pin: ProductPin | None = None
+        self,
+        summary: str,
+        pin: ProductPin | None = None,
+        *,
+        ranker: Ranker | None = None,
     ) -> PriceQuote | None:
         """Return the best price for one shopping item, or None.
 
@@ -410,7 +536,11 @@ class PriceClient:
         to a guess, because a pin is a decision, not a hint.
 
         Without a pin, a qualifier in brackets is tried only after the plain
-        term fails, so the common case stays a single request.
+        term fails, so the common case stays a single request. When scoring
+        still finds nothing, ``ranker`` is offered the candidates that already
+        satisfied the hard constraints; it may only pick one of those or
+        decline, so a tie-break can never override a pack size or a ruled-out
+        variant.
         """
 
         if pin is not None and pin.product_id:
@@ -420,13 +550,21 @@ class PriceClient:
 
         term = self._pin_term(pin, summary)
         target = pin.match_target if pin and pin.match_target else summary
-        match = best_match(target, await self.async_candidates(term))
-        if match is not None or (pin is not None and pin.match_target):
+        candidates = await self.async_candidates(term)
+        match = best_match(target, candidates)
+        if match is not None:
             return match
-        qualified = search_term(summary, keep_qualifier=True)
-        if qualified == search_term(summary):
+        if pin is not None and pin.match_target:
             return None
-        return best_match(summary, await self.async_candidates(qualified))
+        qualified = search_term(summary, keep_qualifier=True)
+        if qualified != search_term(summary):
+            candidates = candidates + await self.async_candidates(qualified)
+            match = best_match(summary, candidates)
+            if match is not None:
+                return match
+        if ranker is None:
+            return None
+        return await ranker(summary, shortlist(summary, candidates))
 
     @staticmethod
     def _pin_term(pin: ProductPin | None, summary: str) -> str:

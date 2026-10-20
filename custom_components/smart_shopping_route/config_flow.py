@@ -14,6 +14,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_AI_MATCH,
     CONF_AI_TASK_ENTITY_ID,
     CONF_DISPLAY_SECTION_PREFIX,
     CONF_GROCER_STORE_ID,
@@ -26,6 +27,7 @@ from .const import (
     CONF_SHOW_COMPLETED,
     CONF_SOURCE_ENTITY_ID,
     CONFIG_ENTRY_VERSION,
+    DEFAULT_AI_MATCH,
     DEFAULT_DISPLAY_SECTION_PREFIX,
     DEFAULT_PRICE_CHAIN,
     DEFAULT_SHOW_COMPLETED,
@@ -149,6 +151,10 @@ class SmartShoppingRouteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_AI_TASK_ENTITY_ID,
                 default=defaults.get(CONF_AI_TASK_ENTITY_ID),
             ): selector.EntitySelector(selector.EntitySelectorConfig(domain="ai_task")),
+            vol.Optional(
+                CONF_AI_MATCH,
+                default=defaults.get(CONF_AI_MATCH, DEFAULT_AI_MATCH),
+            ): selector.BooleanSelector(),
             vol.Required(
                 CONF_SECTIONS,
                 default=(

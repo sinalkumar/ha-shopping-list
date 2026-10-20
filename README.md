@@ -280,6 +280,8 @@ Two kinds of request leave Home Assistant, both with the minimum data needed.
 - configured section names; and
 - configured section hints.
 
+**To the AI Task provider, as an optional tie-break** (**Ask the AI Task to choose when two products are equally close**, off by default): the item summary and the closest product names the supermarket returned, when the price search cannot tell two products apart. The provider answers with a number from that list or "none of these", and the answer is remembered as an automatic pin so the same choice is reused. Leave it off and item names still reach only the supermarket.
+
 **To the chosen supermarket**, only when a price source is enabled: the item summary, as a product search term. This is opt-in per profile, and choosing **No prices** keeps item names away from retailers entirely.
 
 No other Home Assistant state, history, or credentials are sent to either. Price lookups are anonymous: no account and no login, they run in a dedicated session with a dummy cookie jar so retailer cookies are discarded, and nothing about your basket is written to the retailer.
@@ -294,7 +296,7 @@ Locally, the profile cache persists normalized item summaries and their sections
 - **Items stay unclassified:** test the selected AI Task in Home Assistant, press the refresh button, and inspect sanitized Home Assistant logs. The status sensor's `pending_classifications` and `scheduled_retries` attributes show whether work is queued or backing off.
 - **Wrong section:** use **Edit → Move to section** in the shopping card, or call `set_item_section` with a source UID.
 - **An item shows no price:** use **Edit → Wrong product?** to pin a better search without renaming the source item. The coverage banner distinguishes unpriced, partial and stale estimates. A blank history may need an explicit grocer product pin.
-- **Prices look like the wrong product:** pin the item with `pin_item_product` and, if needed, its exact `product_id`. Matching prefers the retailer's own relevance order, so the plainest product usually wins, but shorthand and supplements still need a pin.
+- **Prices look like the wrong product:** pin the item with `pin_item_product` and, if needed, its exact `product_id`. Matching prefers the retailer's own relevance order, so the plainest product usually wins. A pack size or a ruled-out variant such as `(not 50+)` is enforced before any match is accepted, so an item that still resolves wrongly is a naming difference worth pinning.
 - **Changed hints:** call `reclassify_all` if you want new classifications; route order changes alone need no reclassification.
 - **Debugging:** enable debug logging for `custom_components.smart_shopping_route`. Logs intentionally omit item summaries.
 

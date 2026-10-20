@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import smart_shopping_route.price_coordinator as price_coordinator
+from smart_shopping_route import ai_match as prices_ai_match
 from smart_shopping_route.const import (
     PRICE_REFRESH_HOURS,
     PRICE_STALE_AFTER_HOURS,
@@ -22,9 +23,12 @@ from smart_shopping_route.prices import (
     WoolworthsPriceClient,
     best_match,
     create_client,
+    excluded_tokens,
     match_score,
     search_term,
+    shortlist,
 )
+from smart_shopping_route.prices import _tokens as prices_tokens
 
 
 def quote(name: str, price: float, was: float | None = None) -> PriceQuote:
@@ -460,6 +464,8 @@ def test_price_diagnostics_expose_counts_only(monkeypatch) -> None:
         "unmatched_items",
         "scheduled_retries",
         "pinned_items",
+        "ai_match",
+        "automatic_pins",
         "items_with_history",
         "grocer_history",
         "grocer_mirror_bytes",
@@ -2036,3 +2042,362 @@ def test_an_unavailable_source_does_not_clear_the_price_cache(monkeypatch) -> No
 
     assert recovered.quotes == {}
     assert recovered.active == {}
+
+
+# --- a ruled-out variant ----------------------------------------------------
+
+
+def centrum(*names: str) -> list[PriceQuote]:
+    return [
+        PriceQuote(
+            chain=CHAIN_PAKNSAVE,
+            product_id=name,
+            product_name=name,
+            price=24.99,
+            size="100pk",
+        )
+        for name in names
+    ]
+
+
+def test_a_negated_quantity_disqualifies_that_variant() -> None:
+    """Writing "not 50+" used to vote *for* the 50+ product.
+
+    The word was counted as content and "50" matched the candidate, so the wrong
+    formulation scored higher than the right one and won.
+    """
+
+    item = "Centrum advance Adult 100pk (not 50+)"
+    candidates = centrum(
+        "Centrum Advance 50+ Adults Film Coated Tablets",
+        "Centrum Advance Adult 100 Tablets",
+    )
+
+    best = best_match(item, candidates)
+
+    assert best is not None
+    assert best.product_name == "Centrum Advance Adult 100 Tablets"
+
+
+def test_a_plus_qualifier_is_not_the_bare_number() -> None:
+    """ "50+" is an age formulation; "50" is a quantity. They must differ."""
+
+    assert prices_tokens("50+") == ["50+"]
+    assert prices_tokens("50") == ["50"]
+    assert excluded_tokens("Vitamins (not 50+)") == {"50+"}
+
+
+def test_no_added_sugar_is_not_treated_as_an_exclusion() -> None:
+    """A negated phrase with no quantity describes the product, not a rejection.
+
+    Retailer titles state these positively, so excluding the words would discard
+    the very product the household wants.
+    """
+
+    item = "Baked beans no added sugar"
+
+    assert excluded_tokens(item) == set()
+    best = best_match(
+        item,
+        [
+            PriceQuote(
+                chain=CHAIN_PAKNSAVE,
+                product_id="orig",
+                product_name="Wattie's Baked Beans Original 420g",
+                price=2.5,
+                size="420g",
+            ),
+            PriceQuote(
+                chain=CHAIN_PAKNSAVE,
+                product_id="nas",
+                product_name="Wattie's Baked Beans No Added Sugar 420g",
+                price=2.5,
+                size="420g",
+            ),
+        ],
+    )
+    assert best is not None
+    assert "No Added Sugar" in best.product_name
+
+
+def test_pack_size_does_not_dilute_the_match_score() -> None:
+    """The pack size is enforced exactly, so counting it again only hurt.
+
+    "100pk" is printed on the pack, not in the product title, so the correct
+    product lost a fifth of its score for a constraint already satisfied.
+    """
+
+    with_size = match_score("Centrum Adult 100pk", "Centrum Advance Adult")
+    without_size = match_score("Centrum Adult", "Centrum Advance Adult")
+
+    assert with_size == without_size
+
+
+def test_shortlist_offers_only_candidates_that_passed_the_hard_constraints() -> None:
+    """A tie-break may choose among real options, never invent one."""
+
+    item = "Centrum advance Adult 100pk (not 50+)"
+    candidates = centrum(
+        "Centrum Advance 50+ Adults Film Coated Tablets",
+        "Centrum Advance Adult 100 Tablets",
+        "Centrum Advance Adult 50 Tablets",
+    )
+
+    offered = [candidate.product_name for candidate in shortlist(item, candidates)]
+
+    assert offered == ["Centrum Advance Adult 100 Tablets"]
+
+
+# --- the AI tie-break hook --------------------------------------------------
+
+
+class ScriptedClient(WoolworthsPriceClient):
+    """A real client with the network replaced by a scripted candidate list."""
+
+    def __init__(self, candidates: list[PriceQuote]) -> None:
+        self.candidates = candidates
+        self.terms: list[str] = []
+
+    async def async_candidates(self, term: str) -> list[PriceQuote]:
+        self.terms.append(term)
+        return list(self.candidates)
+
+
+def test_a_ranker_is_only_asked_when_scoring_finds_nothing() -> None:
+    """A confident deterministic match must never cost a provider request."""
+
+    asked: list[int] = []
+
+    async def ranker(_summary, candidates):
+        asked.append(len(candidates))
+        return candidates[0]
+
+    client = ScriptedClient(centrum("Centrum Advance Adult 100 Tablets"))
+
+    asyncio.run(
+        client.async_lookup(
+            "Centrum advance Adult 100pk (not 50+)", None, ranker=ranker
+        )
+    )
+
+    assert asked == []
+
+
+def test_a_ranker_resolves_an_item_no_title_shares_words_with() -> None:
+    """The long tail this exists for: the shop names it differently.
+
+    "Nappies" and "Nappy Pants" are the same thing to a person and share no
+    token that scoring accepts, so the item stays unpriced without a tie-break.
+    """
+
+    item = "Nappies"
+    candidates = [
+        PriceQuote(
+            chain=CHAIN_WOOLWORTHS,
+            product_id="huggies",
+            product_name="Huggies Ultra Dry Nappy Pants Walker Boy 32pk",
+            price=24.0,
+        ),
+        PriceQuote(
+            chain=CHAIN_WOOLWORTHS,
+            product_id="wipes",
+            product_name="Huggies Baby Wipes Fragrance Free 80pk",
+            price=6.0,
+        ),
+    ]
+    asked: list[list[str]] = []
+
+    async def ranker(summary, offered):
+        asked.append([candidate.product_name for candidate in offered])
+        assert summary == item
+        return offered[0]
+
+    picked = asyncio.run(
+        ScriptedClient(candidates).async_lookup(item, None, ranker=ranker)
+    )
+
+    assert asked == [
+        [
+            "Huggies Ultra Dry Nappy Pants Walker Boy 32pk",
+            "Huggies Baby Wipes Fragrance Free 80pk",
+        ]
+    ]
+    assert picked is not None
+    assert picked.product_id == "huggies"
+
+
+def test_a_ranker_is_never_offered_a_ruled_out_variant() -> None:
+    """The constraint is enforced before the model sees anything."""
+
+    seen: list[list[str]] = []
+
+    async def ranker(_summary, offered):
+        seen.append([candidate.product_name for candidate in offered])
+        return offered[0] if offered else None
+
+    client = ScriptedClient(centrum("Centrum Advance 50+ Adults Film Coated Tablets"))
+
+    picked = asyncio.run(
+        client.async_lookup(
+            "Centrum advance Adult 100pk (not 50+)", None, ranker=ranker
+        )
+    )
+
+    # The only candidate was the formulation the item rules out, so the tie-break
+    # was offered nothing at all and the item stays honestly unpriced.
+    assert seen == [[]]
+    assert picked is None
+
+
+# --- remembering an AI decision ---------------------------------------------
+
+
+def ranker_entry(**data):
+    """A profile that opted into the AI tie-break."""
+
+    entry = fake_entry()
+    entry.data = {
+        "price_chain": "woolworths",
+        "ai_task_entity_id": "ai_task.synthetic",
+        "ai_match": True,
+        **data,
+    }
+    return entry
+
+
+PANTS = "Huggies Ultra Dry Nappy Pants Walker Boy 32pk"
+
+
+class RankingClient:
+    """Scripted client that records how often the tie-break was consulted."""
+
+    def __init__(self, quotes: dict[str, PriceQuote], stock: bool = True) -> None:
+        self.quotes = quotes
+        self.stock = stock
+        self.ranked: list[str] = []
+
+    async def async_lookup(self, summary, pin=None, *, ranker=None):
+        if pin is not None and pin.product_id:
+            # An exact pin resolves only while that product is still listed.
+            if not self.stock:
+                return None
+            return PriceQuote(
+                chain=CHAIN_WOOLWORTHS,
+                product_id=pin.product_id,
+                product_name=pin.product_name or PANTS,
+                price=24.0,
+            )
+        if summary in self.quotes:
+            return self.quotes[summary]
+        if ranker is None or not self.stock:
+            return None
+        self.ranked.append(summary)
+        offered = [
+            PriceQuote(
+                chain=CHAIN_WOOLWORTHS,
+                product_id="pants",
+                product_name=PANTS,
+                price=24.0,
+            )
+        ]
+        return await ranker(summary, offered)
+
+
+def make_ranking_coordinator(monkeypatch, quotes, summaries=("Nappies",)):
+    async def generate(*_args, **_kwargs):
+        return SimpleNamespace(data={"index": 0})
+
+    monkeypatch.setattr(prices_ai_match, "async_generate_data", generate)
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(loop=asyncio.new_event_loop(), is_stopping=False),
+        ranker_entry(),
+        summaries=lambda: list(summaries),
+    )
+    coordinator._client = RankingClient(quotes)
+    coordinator._ranker = coordinator._build_ranker()
+    return coordinator
+
+
+def test_an_ai_decision_is_remembered_so_it_cannot_flip(monkeypatch) -> None:
+    """Re-asking every cycle would rewrite the price series each refresh.
+
+    The answer is cached as an automatic pin, so the second refresh makes no
+    provider request at all.
+    """
+
+    coordinator = make_ranking_coordinator(monkeypatch, {})
+
+    asyncio.run(coordinator._async_update_data())
+    first = coordinator.quote_for("Nappies")
+    asyncio.run(coordinator._async_update_data())
+
+    assert first is not None
+    assert coordinator._client.ranked == ["Nappies"]
+    pin = coordinator.pin_for("Nappies")
+    assert pin is not None
+    assert pin.is_auto
+    assert pin.product_id == "pants"
+
+
+def test_the_tie_break_is_off_unless_the_profile_asks_for_it() -> None:
+    """Opt-in: item names must not reach a provider by default."""
+
+    entry = fake_entry()
+    entry.data = {"price_chain": "woolworths", "ai_task_entity_id": "ai_task.x"}
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(loop=asyncio.new_event_loop(), is_stopping=False),
+        entry,
+        summaries=lambda: ["Nappies"],
+    )
+    coordinator._client = RankingClient({})
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.ai_match_enabled is False
+    assert coordinator._client.ranked == []
+
+
+def test_an_automatic_pin_that_stops_resolving_is_dropped(monkeypatch) -> None:
+    """A cached answer is not a decision: when the shop changes, match afresh."""
+
+    coordinator = make_ranking_coordinator(monkeypatch, {})
+    asyncio.run(coordinator._async_update_data())
+    assert coordinator.pin_for("Nappies") is not None
+
+    # The product disappears from the shop, and nothing else is offered. A
+    # manual refresh is the household asking now, which is when a delisted
+    # product is noticed.
+    coordinator._client.stock = False
+    coordinator._pins["nappies"] = coordinator._pins["nappies"].__class__(
+        chain="woolworths",
+        query="Nappies",
+        product_id="gone",
+        product_name="Delisted Product",
+        source="auto",
+    )
+    coordinator._force_full = True
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.pin_for("Nappies") is None
+    assert coordinator.quote_for("Nappies") is None
+
+
+def test_a_user_pin_is_never_replaced_by_the_tie_break(monkeypatch) -> None:
+    """The household's own choice outranks any automatic answer."""
+
+    coordinator = make_ranking_coordinator(monkeypatch, {})
+    asyncio.run(
+        coordinator.async_pin(
+            "Nappies", query="Huggies nappy pants", product_id="chosen"
+        )
+    )
+    before = coordinator.pin_for("Nappies")
+
+    asyncio.run(coordinator._async_update_data())
+
+    after = coordinator.pin_for("Nappies")
+    assert after is not None
+    assert after.product_id == before.product_id
+    assert after.source == "user"
+    assert coordinator._client.ranked == []
