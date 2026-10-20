@@ -17,6 +17,7 @@ from smart_shopping_route.prices import (
     CHAIN_WOOLWORTHS,
     MIN_MATCH_SCORE,
     PakNSavePriceClient,
+    PriceClient,
     PriceError,
     PriceQuote,
     ProductPin,
@@ -27,6 +28,7 @@ from smart_shopping_route.prices import (
     match_score,
     search_term,
     shortlist,
+    size_free_term,
 )
 from smart_shopping_route.prices import _tokens as prices_tokens
 
@@ -2401,3 +2403,109 @@ def test_a_user_pin_is_never_replaced_by_the_tie_break(monkeypatch) -> None:
     assert after.product_id == before.product_id
     assert after.source == "user"
     assert coordinator._client.ranked == []
+
+
+def test_an_unstated_pack_size_is_not_a_contradiction() -> None:
+    """Pack counts live on the box, not in the title.
+
+    The plain Centrum Advance Adult product is listed as "Centrum Advance
+    Adults Film Coated Tablets" with no pack count at all, so rejecting it for
+    silence left the item unpriced when it was the only correct candidate.
+    """
+
+    item = "Centrum advance Adult 100pk (not 50+)"
+    best = best_match(
+        item,
+        [
+            PriceQuote(
+                chain=CHAIN_PAKNSAVE,
+                product_id="50plus",
+                product_name="Centrum Advance 50+ Adults Film Coated Tablets",
+                price=24.99,
+            ),
+            PriceQuote(
+                chain=CHAIN_PAKNSAVE,
+                product_id="plain",
+                product_name="Centrum Advance Adults Film Coated Tablets",
+                price=18.99,
+            ),
+        ],
+    )
+
+    assert best is not None
+    assert best.product_id == "plain"
+    assert best.price == 18.99
+
+
+def test_a_stated_pack_size_that_differs_is_still_rejected() -> None:
+    """Silence is tolerated; a contradiction is not."""
+
+    item = "Centrum advance Adult 100pk (not 50+)"
+    best = best_match(
+        item,
+        [
+            PriceQuote(
+                chain=CHAIN_PAKNSAVE,
+                product_id="thirty",
+                product_name="Centrum Advance Adults Film Coated Tablets",
+                price=12.0,
+                size="30pk",
+            ),
+        ],
+    )
+
+    assert best is None
+
+
+def test_a_query_too_specific_falls_back_to_a_looser_one() -> None:
+    """The pack count is on the box, so searching it hides the right product.
+
+    Searching "Centrum advance Adult 100pk" returns only the 50+ box; the plain
+    product is listed without a pack count at all. The retry therefore drops the
+    size from the query, while the size is still enforced on the results.
+    """
+
+    item = "Centrum advance Adult 100pk (not 50+)"
+    plain = PriceQuote(
+        chain=CHAIN_PAKNSAVE,
+        product_id="plain",
+        product_name="Centrum Advance Adults Film Coated Tablets",
+        price=18.99,
+    )
+    fifty = PriceQuote(
+        chain=CHAIN_PAKNSAVE,
+        product_id="50plus",
+        product_name="Centrum Advance 50+ Adults Film Coated Tablets",
+        price=24.99,
+    )
+    results = {
+        "Centrum advance Adult 100pk": [fifty],
+        "Centrum advance Adult 100pk not 50+": [fifty, plain],
+    }
+
+    class Scripted(PriceClient):
+        def __init__(self) -> None:
+            self.terms: list[str] = []
+
+        async def async_candidates(self, term: str) -> list[PriceQuote]:
+            self.terms.append(term)
+            return list(results.get(term, []))
+
+    client = Scripted()
+    best = asyncio.run(client.async_lookup(item))
+
+    assert best is not None
+    assert best.product_id == "plain"
+    assert client.terms[0] == "Centrum advance Adult 100pk"
+    assert "Centrum advance Adult 100pk not 50+" in client.terms
+
+
+def test_a_size_free_retry_is_offered_when_the_qualifier_retry_is_the_same() -> None:
+    """An item with no parenthetical still gets a looser second attempt."""
+
+    assert size_free_term("Centrum advance Adult 100pk") == "Centrum advance Adult"
+    assert size_free_term("Centrum advance Adult 100pk (not 50+)") == (
+        "Centrum advance Adult"
+    )
+    # No size to drop, so no retry is invented.
+    assert size_free_term("Toilet paper") == ""

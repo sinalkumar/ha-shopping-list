@@ -427,6 +427,23 @@ def search_term(summary: str, *, keep_qualifier: bool = False) -> str:
     return f"{base} {qualifiers}".strip()
 
 
+def size_free_term(summary: str) -> str:
+    """Return the item without its pack size.
+
+    A pack count is a constraint, not a search word: retailers keep it on the
+    box, so searching it excludes the right product. "Centrum advance Adult
+    100pk" returns only the 50+ box, while "Centrum advance Adult" returns both.
+    The size is still enforced exactly during matching, so dropping it here
+    loosens the query without loosening the answer.
+    """
+
+    match = _SIZE_IN_TEXT.search(summary or "")
+    if match is None:
+        return ""
+    stripped = (summary[: match.start()] + " " + summary[match.end() :]).strip()
+    return search_term(stripped)
+
+
 def best_match(summary: str, candidates: list[PriceQuote]) -> PriceQuote | None:
     """Pick the closest candidate, or None when nothing is close enough.
 
@@ -457,10 +474,18 @@ def _acceptable(
 
     wanted_size = size_from_text(summary)
     candidate_size = size_from_text(candidate.size or candidate.product_name)
-    if wanted_size and (
-        not candidate_size
-        or wanted_size[2] != candidate_size[2]
-        or not math.isclose(wanted_size[1], candidate_size[1], rel_tol=1e-6)
+    # A size the retailer states and that contradicts the item is fatal. A size
+    # it does not state is not evidence of a contradiction: pack counts are
+    # printed on the box, not in the title, so "Centrum Advance Adults" carries
+    # no "100" even though that is the pack the household means. Rejecting on
+    # silence left correct products unpriced; the quote simply reports no size.
+    if (
+        wanted_size
+        and candidate_size
+        and (
+            wanted_size[2] != candidate_size[2]
+            or not math.isclose(wanted_size[1], candidate_size[1], rel_tol=1e-6)
+        )
     ):
         return False
     if excluded is None:
@@ -548,17 +573,26 @@ class PriceClient:
                 await self.async_candidates(self._pin_term(pin, summary)), pin
             )
 
-        term = self._pin_term(pin, summary)
         target = pin.match_target if pin and pin.match_target else summary
-        candidates = await self.async_candidates(term)
+        candidates = await self.async_candidates(self._pin_term(pin, summary))
         match = best_match(target, candidates)
         if match is not None:
             return match
         if pin is not None and pin.match_target:
             return None
-        qualified = search_term(summary, keep_qualifier=True)
-        if qualified != search_term(summary):
-            candidates = candidates + await self.async_candidates(qualified)
+        # Each retry widens the query rather than the answer: the qualifier is
+        # re-added because the plain noun may be too generic, and the pack size
+        # is dropped because it is printed on the box, not in the title. The
+        # matching constraints still apply to every candidate either way.
+        tried = {self._pin_term(pin, summary), search_term(summary)}
+        for retry in (
+            search_term(summary, keep_qualifier=True),
+            size_free_term(summary),
+        ):
+            if not retry or retry in tried:
+                continue
+            tried.add(retry)
+            candidates = candidates + await self.async_candidates(retry)
             match = best_match(summary, candidates)
             if match is not None:
                 return match

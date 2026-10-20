@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.13
+## 0.8.14
 
 - Stop a rule-out from voting for the product it rules out. "Centrum advance
   Adult 100pk (not 50+)" scored *higher* for the 50+ formulation than for the
@@ -12,6 +12,13 @@
   enforces it exactly, so counting it again only diluted the score: a size
   printed on the pack rather than in the title pushed correct matches below the
   threshold while wrong variants stayed above it.
+- Retry a query that is too specific. A pack count is printed on the box, not
+  in the title, so "Centrum advance Adult 100pk" returned only the 50+ box and
+  the right product never appeared. The retry drops the size from the query
+  while still enforcing it on the results.
+- Treat an unstated pack size as unknown rather than as a contradiction. The
+  plain Centrum Advance Adult product carries no pack count at all, so
+  rejecting it for silence left a correct item unpriced.
 - Add an optional AI tie-break for the items scoring genuinely cannot separate.
   It only ever sees candidates that already passed the hard constraints, may
   only answer with one of them or "none", and its answer is remembered as an
