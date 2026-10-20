@@ -45,13 +45,17 @@ class FakePrices:
     enabled = False
     chain = "none"
 
-    def __init__(self, quotes=None, failed=None) -> None:
+    def __init__(self, quotes=None, failed=None, alternatives=None) -> None:
         self._quotes = quotes or {}
         self.failed = set(failed or ())
+        self._alternatives = alternatives or {}
         self.enabled = bool(self._quotes)
 
     def quote_for(self, summary):
         return self._quotes.get(summary)
+
+    def alternatives_for(self, summary):
+        return self._alternatives.get(summary, [])
 
     @property
     def snapshot(self):
@@ -450,3 +454,76 @@ def test_a_legacy_block_with_an_edited_price_is_rejected() -> None:
             )
         )
     assert not coordinator.source.updated
+
+
+def test_a_priced_item_lists_better_value_alternatives() -> None:
+    """The row answers "is the same thing cheaper elsewhere" as well as "what is it".
+
+    The match is chosen for relevance, so the alternatives are what tells a
+    shopper the pick was also the best value on that shelf.
+    """
+
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features |= int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+    chosen = PriceQuote(
+        "paknsave",
+        "p1",
+        "Centrum Advance Adults 100 Tablets",
+        19.99,
+        size="100pk",
+        unit_price="$0.20/ea",
+    )
+    coordinator.prices = FakePrices(
+        {"Milk": chosen},
+        alternatives={
+            "Milk": [
+                chosen,
+                PriceQuote(
+                    "paknsave",
+                    "p2",
+                    "Centrum Advance Adult 100 Tablets",
+                    24.99,
+                    size="100pk",
+                    unit_price="$0.25/ea",
+                ),
+            ]
+        },
+    )
+
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+    visible = [
+        line
+        for line in displayed.description.splitlines()
+        if not line.startswith("<!-- ssr-price:")
+    ]
+
+    assert (
+        visible[0] == "$19.99 · 100pk · $0.20/ea · Centrum Advance Adults 100 Tablets"
+    )
+    assert visible[1] == (
+        "Alternatives by unit price: "
+        "$19.99 · 100pk · $0.20/ea Centrum Advance Adults 100 Tablets | "
+        "$24.99 · 100pk · $0.25/ea Centrum Advance Adult 100 Tablets"
+    )
+
+
+def test_a_single_option_gets_no_alternatives_line() -> None:
+    """One product is not a comparison, and the line would be noise."""
+
+    entity, coordinator = make_entity()
+    coordinator.source.supported_features |= int(
+        TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
+    )
+    chosen = PriceQuote("paknsave", "p1", "Pams Milk 2L", 4.0, size="2L")
+    coordinator.prices = FakePrices({"Milk": chosen}, alternatives={"Milk": [chosen]})
+
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+    visible = [
+        line
+        for line in displayed.description.splitlines()
+        if not line.startswith("<!-- ssr-price:")
+    ]
+
+    assert visible == ["$4.00 · 2L · Pams Milk 2L"]

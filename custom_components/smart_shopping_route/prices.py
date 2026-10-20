@@ -51,6 +51,11 @@ SEARCH_PAGE_SIZE = 20
 # variants of one product, small enough that the request stays cheap and the
 # answer stays a choice rather than a search.
 AI_SHORTLIST_MAX = 12
+# How many value alternatives are shown beside a match. Five is enough to
+# compare brands and pack formats without turning the row into a catalogue.
+ALTERNATIVE_COUNT = 5
+_SCORE_EPSILON = 1e-9
+_VALUE_EPSILON = 1e-9
 
 _BROWSER_HEADERS = {
     "User-Agent": (
@@ -173,6 +178,23 @@ class PriceQuote:
     @property
     def is_special(self) -> bool:
         return self.was_price is not None and self.was_price > self.price
+
+    @property
+    def unit_cost(self) -> float | None:
+        """Numeric cost per base unit, for ordering quotes by value.
+
+        The display string cannot be sorted ("$19.96/kg" < "$2.39/kg"), so the
+        number is derived from the size the retailer states. None means the
+        pack size is unknown, and such a quote cannot be compared by value.
+        """
+
+        size = size_from_text(self.size or self.product_name)
+        if size is None or not math.isfinite(self.price) or self.price <= 0:
+            return None
+        _label, amount, _base_unit = size
+        if not math.isfinite(amount) or amount <= 0:
+            return None
+        return self.price / amount
 
     @property
     def savings(self) -> float:
@@ -456,15 +478,70 @@ def best_match(summary: str, candidates: list[PriceQuote]) -> PriceQuote | None:
     best: PriceQuote | None = None
     best_score = 0.0
     excluded = excluded_tokens(summary)
+    wanted_size = size_from_text(summary)
     for candidate in candidates:
         if not _acceptable(summary, candidate, excluded):
             continue
         score = match_score(summary, candidate.product_name)
-        if score < MIN_MATCH_SCORE or score <= best_score:
+        if score < MIN_MATCH_SCORE:
+            continue
+        if best is not None and math.isclose(score, best_score, abs_tol=_SCORE_EPSILON):
+            # Equally relevant and the same pack means the same product from a
+            # different brand, so buy the one that is cheaper per unit. Only a
+            # stated pack size makes that comparison meaningful: without one,
+            # "Strawberries" scores equally for a punnet and for strawberry
+            # wafers, and the cheaper per gram would be the wrong purchase. A
+            # tie that value cannot settle keeps the retailer's own order.
+            if wanted_size is None or not _cheaper_per_unit(candidate, best):
+                continue
+        elif score <= best_score:
             continue
         best_score = score
         best = replace(candidate, score=score)
     return best
+
+
+def _cheaper_per_unit(candidate: PriceQuote, incumbent: PriceQuote) -> bool:
+    """True when ``candidate`` is the better value of two equally close matches."""
+
+    new = candidate.unit_cost
+    old = incumbent.unit_cost
+    if new is None:
+        return False
+    if old is None:
+        return True
+    return new < old - _VALUE_EPSILON
+
+
+def alternatives(
+    summary: str, candidates: list[PriceQuote], limit: int = ALTERNATIVE_COUNT
+) -> list[PriceQuote]:
+    """Return the best-value alternatives for an item, cheapest per unit first.
+
+    Only candidates that satisfy the same hard constraints as a match are
+    offered, so this never suggests a different pack size or a ruled-out
+    variant. Quotes whose size is unknown cannot be compared by value and are
+    left out rather than guessed at.
+    """
+
+    if size_from_text(summary) is None:
+        # Nothing to compare: a per-unit price of a differently sized product is
+        # not an alternative, it is a different purchase.
+        return []
+    excluded = excluded_tokens(summary)
+    seen: set[str] = set()
+    priced: list[PriceQuote] = []
+    for candidate in candidates:
+        if candidate.product_id in seen or not _acceptable(
+            summary, candidate, excluded
+        ):
+            continue
+        if candidate.unit_cost is None:
+            continue
+        seen.add(candidate.product_id)
+        priced.append(candidate)
+    priced.sort(key=lambda quote: (quote.unit_cost, quote.price, quote.product_name))
+    return priced[:limit]
 
 
 def _acceptable(
@@ -552,6 +629,7 @@ class PriceClient:
         pin: ProductPin | None = None,
         *,
         ranker: Ranker | None = None,
+        alternatives_out: list[PriceQuote] | None = None,
     ) -> PriceQuote | None:
         """Return the best price for one shopping item, or None.
 
@@ -596,6 +674,8 @@ class PriceClient:
             match = best_match(summary, candidates)
             if match is not None:
                 return match
+        if alternatives_out is not None:
+            alternatives_out.extend(alternatives(summary, candidates))
         if ranker is None:
             return None
         return await ranker(summary, shortlist(summary, candidates))

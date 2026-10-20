@@ -13,6 +13,7 @@ from smart_shopping_route.const import (
     PRICE_STALE_AFTER_HOURS,
 )
 from smart_shopping_route.prices import (
+    ALTERNATIVE_COUNT,
     CHAIN_PAKNSAVE,
     CHAIN_WOOLWORTHS,
     MIN_MATCH_SCORE,
@@ -22,6 +23,7 @@ from smart_shopping_route.prices import (
     PriceQuote,
     ProductPin,
     WoolworthsPriceClient,
+    alternatives,
     best_match,
     create_client,
     excluded_tokens,
@@ -337,7 +339,7 @@ def make_price_coordinator(monkeypatch, summaries, quotes_by_term):
     calls: list[str] = []
 
     class Client:
-        async def async_lookup(self, summary, pin=None):
+        async def async_lookup(self, summary, pin=None, **_kwargs):
             calls.append(summary)
             return quotes_by_term.get(summary)
 
@@ -439,7 +441,7 @@ def test_cheapest_seen_tracks_a_lower_price(monkeypatch) -> None:
     assert coordinator.cheapest_seen_for("Butter") == 9.0
 
     coordinator._snapshot.quotes.clear()
-    coordinator._client.async_lookup = lambda _s, _p=None: _return(
+    coordinator._client.async_lookup = lambda _s, _p=None, **_k: _return(
         quote("Butter 500g", 7.5)
     )
     asyncio.run(coordinator._async_update_data())
@@ -573,7 +575,7 @@ def test_all_transport_failures_raise_update_failed(monkeypatch) -> None:
     from homeassistant.helpers.update_coordinator import UpdateFailed
 
     class FailingClient:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             raise PriceError("down")
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -589,7 +591,7 @@ def test_all_transport_failures_raise_update_failed(monkeypatch) -> None:
 
 def test_partial_transport_failure_does_not_raise(monkeypatch) -> None:
     class MixedClient:
-        async def async_lookup(self, summary, pin=None):
+        async def async_lookup(self, summary, pin=None, **_kwargs):
             if summary == "Milk":
                 raise PriceError("down")
             return quote("Bread 600g", 3.5)
@@ -628,7 +630,7 @@ def test_previous_price_records_the_old_value(monkeypatch) -> None:
     asyncio.run(coordinator._async_update_data())
     assert coordinator.cheapest_seen_for("Butter") == 9.0
 
-    coordinator._client.async_lookup = lambda _s, _p=None: _return(
+    coordinator._client.async_lookup = lambda _s, _p=None, **_k: _return(
         quote("Butter 500g", 7.5)
     )
     asyncio.run(coordinator.async_refresh())
@@ -664,7 +666,7 @@ def test_shutdown_cancels_an_in_flight_refresh(monkeypatch) -> None:
     cancelled = False
 
     class SlowClient:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             nonlocal cancelled
             started.set()
             try:
@@ -712,7 +714,7 @@ def test_forced_refresh_reprices_existing_items(monkeypatch) -> None:
     prices = {"Butter": 9.0}
 
     class MovingClient:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Butter 500g", prices["Butter"])
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -753,7 +755,7 @@ def test_pin_query_reaches_a_product_the_item_name_cannot(monkeypatch) -> None:
     searched: list[str] = []
 
     class Client:
-        async def async_lookup(self, summary, pin=None):
+        async def async_lookup(self, summary, pin=None, **_kwargs):
             searched.append(pin.match_target if pin else summary)
             return quote(
                 "Example Brand Kids Multivitamin Gummies 110 Pack",
@@ -878,7 +880,7 @@ def test_drop_is_reported_when_a_price_falls(monkeypatch) -> None:
     prices = {"Butter": 9.0}
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Pams Butter 500g", prices["Butter"])
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -900,7 +902,7 @@ def test_no_drop_reported_when_price_is_unchanged_or_rises(monkeypatch) -> None:
     prices = {"Butter": 9.0}
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Pams Butter 500g", prices["Butter"])
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -923,7 +925,7 @@ def test_a_real_special_is_not_double_counted_as_a_drop(monkeypatch) -> None:
     prices = {"Butter": 9.7}
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Anchor Butter 500g", 8.5, was=prices["Butter"])
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -947,7 +949,7 @@ def test_unexpected_error_is_logged_once_per_cycle(caplog) -> None:
     import logging
 
     class Broken:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             raise RuntimeError("shape changed")
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -969,7 +971,7 @@ def test_unexpected_error_backs_off(monkeypatch) -> None:
     calls: list[str] = []
 
     class Broken:
-        async def async_lookup(self, summary, _pin=None):
+        async def async_lookup(self, summary, _pin=None, **_kwargs):
             calls.append(summary)
             raise RuntimeError("shape changed")
 
@@ -992,7 +994,7 @@ def test_price_history_is_bounded(monkeypatch) -> None:
     summaries = ["Milk"]
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Milk 2L", 4.0)
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -1062,7 +1064,7 @@ def test_drop_is_reported_only_in_the_refresh_that_observed_it(monkeypatch) -> N
     prices = {"Butter": 9.0}
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Pams Butter 500g", prices["Butter"])
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -1087,7 +1089,7 @@ def test_history_is_persisted_after_a_refresh() -> None:
     """HA shutdown does not unload entries, so history must be written eagerly."""
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Milk 2L", 4.0)
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -1109,7 +1111,7 @@ def test_a_request_during_a_refresh_runs_again_afterwards() -> None:
     calls: list[str] = []
 
     class SlowClient:
-        async def async_lookup(self, summary, _pin=None):
+        async def async_lookup(self, summary, _pin=None, **_kwargs):
             calls.append(summary)
             if len(calls) == 1:
                 started.set()
@@ -1149,7 +1151,7 @@ def test_the_real_interval_path_reprices_and_notifies() -> None:
         def __init__(self) -> None:
             self.price = 9.0
 
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Butter 500g", self.price)
 
     entry = fake_entry()
@@ -1188,7 +1190,7 @@ def test_interval_refresh_notifies_entities() -> None:
     notified: list[bool] = []
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Milk 2L", 4.0)
 
     entry = fake_entry()
@@ -1256,7 +1258,7 @@ def test_async_setup_registers_a_listener_that_notifies(monkeypatch) -> None:
     notified: list[bool] = []
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Butter 500g", 5.0)
 
     monkeypatch.setattr(price_coordinator, "create_client", lambda *_a, **_k: Client())
@@ -1283,7 +1285,7 @@ def test_pin_dispatches_exactly_once() -> None:
     dispatched: list[bool] = []
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Kids Multivitamin Gummies", 19.99)
 
     entry = fake_entry()
@@ -1317,7 +1319,7 @@ def test_pin_notifies_immediately_when_a_refresh_is_in_flight() -> None:
     release = asyncio.Event()
 
     class SlowClient:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             started.set()
             await release.wait()
             return quote("Milk 2L", 4.0)
@@ -1355,7 +1357,7 @@ def test_series_records_a_point_per_change(monkeypatch) -> None:
     prices = {"Butter": 9.0}
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Pams Butter 500g", prices["Butter"])
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -1382,7 +1384,7 @@ def test_unchanged_price_does_not_grow_the_series(monkeypatch) -> None:
     """Only changes (or a 6-hour gap) are recorded, so the series stays compact."""
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Pams Butter 500g", 9.0)
 
     coordinator = price_coordinator.PriceCoordinator(
@@ -1403,7 +1405,7 @@ def test_series_points_are_capped_per_item(monkeypatch) -> None:
     prices = {"n": 0}
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             prices["n"] += 1
             return quote("Pams Butter 500g", float(prices["n"]))
 
@@ -1422,7 +1424,7 @@ def test_series_survives_a_restart(monkeypatch) -> None:
     """A restart must not reset the reference price, or drops stop working."""
 
     class Client:
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             return quote("Pams Butter 500g", 7.0)
 
     entry = fake_entry()
@@ -1596,7 +1598,7 @@ def test_a_drop_survives_an_incremental_refresh_that_skips_the_item(
     summaries = ["Butter"]
 
     class Client:
-        async def async_lookup(self, summary, _pin=None):
+        async def async_lookup(self, summary, _pin=None, **_kwargs):
             if summary == "Butter":
                 return quote("Pams Butter 500g", prices["Butter"])
             return quote("Milk 2L", 4.0)
@@ -1627,7 +1629,7 @@ def test_a_failed_refresh_does_not_erase_a_known_drop(monkeypatch) -> None:
         def __init__(self) -> None:
             self.fail = False
 
-        async def async_lookup(self, _summary, _pin=None):
+        async def async_lookup(self, _summary, _pin=None, **_kwargs):
             if self.fail:
                 raise PriceError("down")
             return quote("Pams Butter 500g", 7.5)
@@ -2022,7 +2024,7 @@ def test_an_unavailable_source_does_not_clear_the_price_cache(monkeypatch) -> No
     )
 
     class Client:
-        async def async_lookup(self, summary, pin=None):
+        async def async_lookup(self, summary, pin=None, **_kwargs):
             return quote("Milk", 4.0) if summary == "Milk" else None
 
     coordinator._client = Client()
@@ -2278,7 +2280,7 @@ class RankingClient:
         self.stock = stock
         self.ranked: list[str] = []
 
-    async def async_lookup(self, summary, pin=None, *, ranker=None):
+    async def async_lookup(self, summary, pin=None, *, ranker=None, **_kwargs):
         if pin is not None and pin.product_id:
             # An exact pin resolves only while that product is still listed.
             if not self.stock:
@@ -2509,3 +2511,124 @@ def test_a_size_free_retry_is_offered_when_the_qualifier_retry_is_the_same() -> 
     )
     # No size to drop, so no retry is invented.
     assert size_free_term("Toilet paper") == ""
+
+
+# --- value ranking ----------------------------------------------------------
+
+
+def priced(name: str, price: float, size: str | None = None) -> PriceQuote:
+    return PriceQuote(
+        chain=CHAIN_PAKNSAVE,
+        product_id=name,
+        product_name=name,
+        price=price,
+        size=size,
+    )
+
+
+def test_alternatives_are_cheapest_per_unit_first() -> None:
+    """The list answers "is the same thing cheaper elsewhere".
+
+    Only the pack the item asks for is offered, so every option is the same
+    thing and the cheapest per unit is simply the cheapest to buy.
+    """
+
+    item = "Centrum advance Adult 100pk (not 50+)"
+    options = alternatives(
+        item,
+        [
+            priced("Centrum Advance Adult 100 Tablets", 24.99, "100pk"),
+            priced("Centrum Advance Adults 100 Tablets", 19.99, "100pk"),
+            priced("Centrum Advance Adult Multivitamin 100 Tablets", 29.99, "100pk"),
+        ],
+    )
+
+    assert [option.product_id for option in options] == [
+        "Centrum Advance Adults 100 Tablets",
+        "Centrum Advance Adult 100 Tablets",
+        "Centrum Advance Adult Multivitamin 100 Tablets",
+    ]
+
+
+def test_alternatives_exclude_a_different_pack_size() -> None:
+    """A bigger box is a different purchase, not a cheaper version of this one."""
+
+    options = alternatives(
+        "Centrum advance Adult 100pk (not 50+)",
+        [
+            priced("Centrum Advance Adults 200 Tablets", 39.99, "200pk"),
+            priced("Centrum Advance Adults 60 Tablets", 19.99, "60pk"),
+        ],
+    )
+
+    assert options == []
+
+
+def test_alternatives_never_include_a_ruled_out_or_mispacked_product() -> None:
+    item = "Centrum advance Adult 100pk (not 50+)"
+
+    options = alternatives(
+        item,
+        [
+            priced("Centrum Advance 50+ Adults 100 Tablets", 14.99, "100pk"),
+            priced("Centrum Advance Adults 30 Tablets", 9.99, "30pk"),
+            priced("Centrum Advance Adult 100 Tablets", 24.99, "100pk"),
+        ],
+    )
+
+    assert [option.product_id for option in options] == [
+        "Centrum Advance Adult 100 Tablets"
+    ]
+
+
+def test_no_alternatives_without_a_stated_pack_size() -> None:
+    """A per-unit price of a different pack is not an alternative."""
+
+    assert alternatives("Strawberries", [priced("Punnet", 7.9, "250g")]) == []
+
+
+def test_alternatives_are_capped() -> None:
+    item = "Milk 2L"
+    options = alternatives(
+        item,
+        [priced(f"Brand {index} Milk 2L", 4.0 + index, "2L") for index in range(9)],
+    )
+
+    assert len(options) == ALTERNATIVE_COUNT
+    assert options[0].product_id == "Brand 0 Milk 2L"
+
+
+def test_a_stated_pack_size_prefers_the_better_value_of_two_equal_matches() -> None:
+    """Equally relevant and the same pack means the same product, cheaper wins."""
+
+    item = "Centrum advance Adult 100pk (not 50+)"
+    best = best_match(
+        item,
+        [
+            priced("Centrum Advance Adult 100 Tablets", 29.99, "100pk"),
+            priced("Centrum Advance Adults Film Coated 100 Tablets", 24.99, "100pk"),
+        ],
+    )
+
+    assert best is not None
+    assert best.price == 24.99
+
+
+def test_without_a_pack_size_the_retailer_order_still_decides() -> None:
+    """Value must not override relevance when the pack is unstated.
+
+    "Strawberries" scores equally for a punnet and for strawberry wafers, and
+    the wafers are cheaper per gram. Buying them would be wrong, so the
+    retailer's own relevance order stands.
+    """
+
+    best = best_match(
+        "Strawberries",
+        [
+            priced("Woolworths Fresh Strawberry 250g Punnet", 7.9, "250g"),
+            priced("Woolworths Creme Filled Strawberry Wafers 125g", 1.09, "125g"),
+        ],
+    )
+
+    assert best is not None
+    assert "Punnet" in best.product_name

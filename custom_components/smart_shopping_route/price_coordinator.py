@@ -80,6 +80,10 @@ class PriceSnapshot:
     observed_at: dict[str, float] = field(default_factory=dict)
     errors: set[str] = field(default_factory=set)
     store_history: dict[str, list[PricePoint]] = field(default_factory=dict)
+    # Better-value alternatives for a matched item, cheapest per unit first.
+    # Shown beside the chosen product so a household can see what else was on
+    # the shelf at that price, without having to trust the ranking blindly.
+    alternatives: dict[str, list[PriceQuote]] = field(default_factory=dict)
     last_attempt_at: float | None = None
 
     @property
@@ -1022,14 +1026,20 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         version = self._pin_versions.get(key, 0)
         try:
             pin = self._pins.get(key)
+            found: list[PriceQuote] = []
             async with self._semaphore:
                 # Only the AI-enabled path uses the extended signature, so the
                 # ordinary lookup stays a two-argument call.
                 if self._ranker is None:
-                    quote = await self._client.async_lookup(summary, pin)
+                    quote = await self._client.async_lookup(
+                        summary, pin, alternatives_out=found
+                    )
                 else:
                     quote = await self._client.async_lookup(
-                        summary, pin, ranker=self._ranker.async_pick
+                        summary,
+                        pin,
+                        ranker=self._ranker.async_pick,
+                        alternatives_out=found,
                     )
         except PriceError:
             if self._closed or version != self._pin_versions.get(key, 0):
@@ -1060,6 +1070,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             self._snapshot.quotes.pop(key, None)
             self._snapshot.observed_at.pop(key, None)
             self._snapshot.drops_now.pop(key, None)
+            self._snapshot.alternatives.pop(key, None)
             pin = self._pins.get(key)
             if pin is not None and pin.is_auto:
                 del self._pins[key]
@@ -1071,6 +1082,10 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             self._schedule_retry(key)
             return
         self._snapshot.failed.discard(key)
+        if found:
+            self._snapshot.alternatives[key] = found
+        else:
+            self._snapshot.alternatives.pop(key, None)
         # Remember an AI tie-break so the choice cannot flip between refreshes.
         # A flip would rewrite the price series on every cycle, which is exactly
         # the history the drop detection is built on.
@@ -1140,6 +1155,9 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
 
     def quote_for(self, summary: str) -> PriceQuote | None:
         return self._snapshot.quotes.get(normalize_summary(summary))
+
+    def alternatives_for(self, summary: str) -> list[PriceQuote]:
+        return self._snapshot.alternatives.get(normalize_summary(summary), [])
 
     def cheapest_seen_for(self, summary: str) -> float | None:
         return self._snapshot.lowest_for(normalize_summary(summary))

@@ -33,6 +33,7 @@ from .models import (
     sort_items,
     strip_display_prefix,
 )
+from .prices import PriceQuote
 
 # Blocks rendered by 0.8.7 and earlier carried a full digest on its own line.
 # Both forms are still recognised so an item open in a stale dialog saves.
@@ -183,7 +184,31 @@ class SmartShoppingRouteTodo(TodoListEntity):
         if quote.unit_price:
             parts.append(quote.unit_price)
         parts.append(quote.product_name)
-        return " · ".join(parts)
+        line = " · ".join(parts)
+        better = self._alternatives_line(item.summary or "", quote)
+        return f"{line}\n{better}" if better else line
+
+    def _alternatives_line(self, summary: str, quote: PriceQuote) -> str | None:
+        """Return a value comparison line, cheapest per unit first.
+
+        The match is chosen for relevance; this line answers the next question a
+        shopper actually asks, which is whether the same thing is cheaper in
+        another brand or pack. Only products that satisfy the same constraints
+        are listed, so nothing here is a different size or a ruled-out variant.
+        """
+
+        options = self.coordinator.prices.alternatives_for(summary)
+        if len(options) < 2:
+            return None
+        rendered = []
+        for option in options:
+            detail = " · ".join(
+                part
+                for part in (f"${option.price:.2f}", option.size, option.unit_price)
+                if part
+            )
+            rendered.append(f"{detail} {option.product_name}")
+        return "Alternatives by unit price: " + " | ".join(rendered)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()

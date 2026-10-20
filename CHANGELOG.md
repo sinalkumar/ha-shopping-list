@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.15
+
+- Show the better-value alternatives beside a matched product. The row gains a
+  second line, "Alternatives by unit price: …", listing up to five products that
+  satisfy the same constraints, cheapest per unit first. The match is chosen for
+  relevance; this line answers the next question a shopper asks, which is
+  whether the same thing is cheaper in another brand.
+- Prefer the better value when two products are equally relevant *and* the item
+  states a pack size. Without a stated size the retailer's own relevance order
+  stands: "Strawberries" scores equally for a punnet and for strawberry wafers,
+  and the wafers are cheaper per gram.
+- Compare alternatives only when the pack size is known. A per-unit price of a
+  differently sized product is not an alternative, it is a different purchase.
+
 ## 0.8.14
 
 - Stop a rule-out from voting for the product it rules out. "Centrum advance
