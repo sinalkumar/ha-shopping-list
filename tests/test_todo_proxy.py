@@ -505,9 +505,9 @@ def test_a_priced_item_lists_better_value_alternatives() -> None:
     # The pick stays in the ranking so a shopper can see where it sits, but it is
     # not named twice: the line above already carries the product.
     assert visible[1] == (
-        "Alternatives by unit price: "
-        "$19.99 · 100pk · $0.20/ea (this item) | "
-        "$24.99 · 100pk · $0.25/ea Centrum Advance Adult 100 Tablets"
+        " — Alternatives by unit price: "
+        "$0.20/ea (this item) | "
+        "$0.25/ea Centrum Advance Adult 100 Tablets"
     )
 
 
@@ -551,9 +551,9 @@ def test_the_chosen_product_is_shown_where_it_ranks_by_value() -> None:
     ]
 
     assert visible[1] == (
-        "Alternatives by unit price: "
-        "$19.99 · 100pk · $0.20/ea Centrum Advance Adults 100 Tablets | "
-        "$24.99 · 100pk · $0.25/ea (this item)"
+        " — Alternatives by unit price: "
+        "$0.20/ea Centrum Advance Adults 100 Tablets | "
+        "$0.25/ea (this item)"
     )
 
 

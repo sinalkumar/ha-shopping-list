@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.17
+
+- Make the alternatives readable in the native list. Home Assistant renders a
+  description as one inline run, so the line ran on from the product name as a
+  single sentence, and each entry repeated the price and size already shown
+  above it. It now starts on a new clause and leads with the per-unit price,
+  which is the only number the ranking turns on; the pack size is shared by
+  every entry because a different one is never offered.
+
 ## 0.8.16
 
 - Actually show the alternatives on a priced row. They were collected only when

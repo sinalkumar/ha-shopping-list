@@ -206,16 +206,19 @@ class SmartShoppingRouteTodo(TodoListEntity):
             return None
         rendered = []
         for option in options:
-            detail = " · ".join(
-                part
-                for part in (f"${option.price:.2f}", option.size, option.unit_price)
-                if part
+            # Home Assistant renders a description as one inline run, so every
+            # word here costs a wrapped line in the native list. The unit price
+            # is the sort key and the only number the ranking turns on, so it
+            # leads each entry; the size is shared by every entry (a different
+            # one is never offered) and the shelf price is already on the line
+            # above for the item itself.
+            label = (
+                "(this item)"
+                if option.product_id == quote.product_id
+                else option.product_name
             )
-            if option.product_id == quote.product_id:
-                rendered.append(f"{detail} (this item)")
-            else:
-                rendered.append(f"{detail} {option.product_name}")
-        return "Alternatives by unit price: " + " | ".join(rendered)
+            rendered.append(f"{option.unit_price} {label}")
+        return " — Alternatives by unit price: " + " | ".join(rendered)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
