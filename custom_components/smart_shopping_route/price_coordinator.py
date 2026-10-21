@@ -1210,7 +1210,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         retailer's reference, and a discount nobody verified is worse than none.
         """
 
-        size = size_from_text(label)
+        size = size_from_text(label.lower())
         return PriceQuote(
             chain=self._chain_key,
             product_id=f"{CATALOGUE_ID_PREFIX}{product_id}",

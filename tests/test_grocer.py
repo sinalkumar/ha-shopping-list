@@ -913,6 +913,7 @@ def test_catalogue_prices_a_product_the_search_index_omits(monkeypatch) -> None:
     quote = snapshot.quotes["centrum advance adult 100pk (not 50+)"]
     assert quote.product_id == "catalogue:45609"
     assert quote.price == 24.99
+    assert quote.size == "100tablets"
     assert quote.unit_price == "$0.25/ea"
     assert snapshot.failed == set()
     assert coordinator.as_diagnostics()["store_catalogue_items"] == 1
