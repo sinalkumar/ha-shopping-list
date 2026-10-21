@@ -171,6 +171,18 @@ Item names are matched to retailer product titles by comparing words, so `Weetbi
 
 An item that was searched and found nothing reads `no price match — refresh, rename or pin this item` instead of staying silent. Rename it to words the retailer uses, pin the product, or press the profile's refresh button to search again.
 
+A retailer's search index does not list everything its stores sell. In-store-only
+lines such as vitamins are priced at the store but absent from the online search,
+so the right product never appears: Pak'nSave lists the plain Centrum Advance
+Adults 100pk in its store price file but its search returns only the 60pk and the
+50+ box. When the search cannot resolve a Pak'nSave item, the store's own price
+file -- already mirrored for history -- is used to find the product the store
+actually stocks, and the same word-matching floor applies. Catalogue names come
+from grocer.nz slugs, so a row found this way may show the product without its
+brand. Woolworths is never priced this way: an anonymous Woolworths quote is an
+online price, not the shelf price of a chosen store. `store_catalogue_items` in
+diagnostics counts the items priced from the store catalogue.
+
 ### Pinning a product
 
 Household shorthand rarely looks like a product title. When automatic matching cannot find something, pin it once and the pin persists across restarts:

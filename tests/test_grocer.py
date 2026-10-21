@@ -17,9 +17,11 @@ from smart_shopping_route.grocer import (
     GrocerMatch,
     GrocerPrice,
     GrocerProduct,
+    _display_name,
     _normalise,
     _sizes_compatible,
 )
+from smart_shopping_route.prices import name_tokens
 
 
 def _entry(extra: dict):
@@ -777,3 +779,276 @@ def test_backfill_honours_a_grocer_pin() -> None:
 
     assert called == [10749]
     assert [p.price for p in coordinator.snapshot.points_for("flora")] == [7.39, 9.79]
+
+
+# --- the store's own catalogue ---------------------------------------------
+
+
+def test_catalogue_name_is_readable() -> None:
+    """Slugs are lowercase and hyphenated; a row must not show them raw."""
+
+    assert (
+        _display_name("advance adults daily multivitamin supplement 100 tablets")
+        == "Advance Adults Daily Multivitamin Supplement 100 Tablets"
+    )
+    assert _display_name("wattie's tomato sauce 420g") == "Wattie's Tomato Sauce 420g"
+    assert _display_name("sanitarium weet-bix 1.2kg") == "Sanitarium Weet-Bix 1.2kg"
+
+
+def test_catalogue_candidates_are_the_stores_named_products(
+    data_dir, monkeypatch
+) -> None:
+    """Only what this store prices can be offered, and only if it has a name."""
+
+    data_dir._store_prices = {
+        228: {
+            45609: GrocerPrice(45609, 24.99, None),
+            45610: GrocerPrice(45610, 24.99, None),
+            999: GrocerPrice(999, 5.0, None),  # priced, but no catalogue name
+        }
+    }
+    monkeypatch.setattr(
+        GrocerData,
+        "names",
+        lambda _self: {
+            45609: "advance adults daily multivitamin supplement 100 tablets",
+            45610: "advance 50 daily multivitamin supplement 100 tablets",
+        },
+    )
+
+    found = data_dir.catalogue_candidates(228, {"centrum", "advance", "adult"})
+
+    assert [product_id for product_id, _label, _row in found] == [45609, 45610]
+    assert found[0][1] == "Advance Adults Daily Multivitamin Supplement 100 Tablets"
+
+
+def test_catalogue_candidates_need_a_shared_word(data_dir, monkeypatch) -> None:
+    """A flat scan has no relevance order, so only shared words are scored."""
+
+    data_dir._store_prices = {228: {45609: GrocerPrice(45609, 24.99, None)}}
+    monkeypatch.setattr(
+        GrocerData,
+        "names",
+        lambda _self: {
+            45609: "advance adults daily multivitamin supplement 100 tablets"
+        },
+    )
+
+    assert data_dir.catalogue_candidates(228, {"bananas"}) == []
+
+
+def test_catalogue_candidates_always_include_a_pinned_product(
+    data_dir, monkeypatch
+) -> None:
+    """An explicit pin is a decision, so its words do not have to match."""
+
+    data_dir._store_prices = {228: {45610: GrocerPrice(45610, 24.99, None)}}
+    monkeypatch.setattr(
+        GrocerData,
+        "names",
+        lambda _self: {45610: "advance 50 daily multivitamin supplement 100 tablets"},
+    )
+
+    found = data_dir.catalogue_candidates(228, {"centrum"}, include=45610)
+
+    assert [product_id for product_id, _label, _row in found] == [45610]
+
+
+def _catalogue_coordinator(monkeypatch, summaries, lookup, rows, store_id=228):
+    """A Pak'nSave coordinator whose search and catalogue are scripted."""
+
+    class Client:
+        async def async_lookup(self, summary, pin=None, **_kwargs):
+            return lookup.get(summary)
+
+    coordinator = price_coordinator.PriceCoordinator(
+        SimpleNamespace(), _entry({"grocer_store_id": store_id}), summaries=summaries
+    )
+    coordinator._client = Client()
+
+    async def candidates(_store_id, tokens, include=None):
+        return [
+            (product_id, label, GrocerPrice(product_id, price, None))
+            for product_id, label, price in rows
+            if include == product_id or name_tokens(label) & tokens
+        ]
+
+    async def pinned(_store_id, product_id):
+        return None
+
+    async def auto(*_args, **_kwargs):
+        return None
+
+    coordinator._grocer_data = SimpleNamespace(
+        async_catalogue_candidates=candidates,
+        async_pinned_match=pinned,
+        async_match_with_history=auto,
+    )
+    return coordinator
+
+
+CENTRUM_ITEM = "Centrum advance Adult 100pk (not 50+)"
+CENTRUM_CATALOGUE = [
+    (45609, "advance adults daily multivitamin supplement 100 tablets", 24.99),
+    (45610, "advance 50 daily multivitamin supplement 100 tablets", 24.99),
+    (45626, "advance adults daily multivitamin supplement 60 tablets", 18.99),
+]
+
+
+def test_catalogue_prices_a_product_the_search_index_omits(monkeypatch) -> None:
+    """The reported case: on the shelf, priced at the store, missing from search.
+
+    Pak'nSave lists no plain Advance Adults 100pk in its online search, only the
+    50+ box and the 60pk, so the item was left unpriced although the store sells
+    it. Its own price file does carry it.
+    """
+
+    summaries = [CENTRUM_ITEM]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE
+    )
+
+    snapshot = asyncio.run(coordinator._async_update_data())
+
+    quote = snapshot.quotes["centrum advance adult 100pk (not 50+)"]
+    assert quote.product_id == "catalogue:45609"
+    assert quote.price == 24.99
+    assert quote.unit_price == "$0.25/ea"
+    assert snapshot.failed == set()
+    assert coordinator.as_diagnostics()["store_catalogue_items"] == 1
+
+
+def test_catalogue_is_not_consulted_for_woolworths(monkeypatch) -> None:
+    """An online Woolworths price and a shelf price are different scopes."""
+
+    summaries = [CENTRUM_ITEM]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE
+    )
+    coordinator.chain = "woolworths"
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("Woolworths must not be priced from a store file")
+
+    coordinator._grocer_data.async_catalogue_candidates = forbidden
+
+    snapshot = asyncio.run(coordinator._async_update_data())
+
+    assert snapshot.quotes == {}
+    assert snapshot.failed == {"centrum advance adult 100pk (not 50+)"}
+
+
+def test_catalogue_never_overrides_a_search_match(monkeypatch) -> None:
+    """The fallback is a last resort, not a second opinion on price."""
+
+    summaries = ["Milk"]
+    found = price_coordinator.PriceQuote(
+        chain="paknsave", product_id="p", product_name="Pams Milk 2L", price=4.0
+    )
+    coordinator = _catalogue_coordinator(
+        monkeypatch,
+        lambda: list(summaries),
+        {"Milk": found},
+        [(45609, "anchor milk 2l", 3.5)],
+    )
+
+    snapshot = asyncio.run(coordinator._async_update_data())
+
+    assert snapshot.quotes["milk"].product_id == "p"
+    assert coordinator.as_diagnostics()["store_catalogue_items"] == 0
+
+
+def test_catalogue_quote_binds_that_products_history(monkeypatch) -> None:
+    """The catalogue already names the store's product, so nothing is re-matched."""
+
+    summaries = [CENTRUM_ITEM]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE
+    )
+    asked: list[int] = []
+
+    async def pinned(_store_id, product_id):
+        asked.append(product_id)
+        return GrocerMatch(
+            product=GrocerProduct(product_id, "advance adults daily multivitamin"),
+            price=GrocerPrice(product_id, 24.99, None),
+            history=[(1000.0, 34.99), (2000.0, 29.99), (3000.0, 24.99)],
+        )
+
+    async def auto(*_args, **_kwargs):
+        raise AssertionError("a catalogued product must not be matched again")
+
+    coordinator._grocer_data.async_pinned_match = pinned
+    coordinator._grocer_data.async_match_with_history = auto
+
+    snapshot = asyncio.run(coordinator._async_update_data())
+
+    series = snapshot.points_for("centrum advance adult 100pk (not 50+)")
+
+    assert asked == [45609]
+    # The imported series, then our own reading of the same price: a point we
+    # took ourselves is fresher than the mirror's copy of it.
+    assert [point.price for point in series][:3] == [34.99, 29.99, 24.99]
+    assert series[-1].price == 24.99
+    assert snapshot.lowest_for("centrum advance adult 100pk (not 50+)") == 24.99
+
+
+def test_a_grocer_pin_wins_over_the_better_scoring_sibling(monkeypatch) -> None:
+    """A user who names the product gets exactly that product."""
+
+    summaries = ["Centrum advance Adult 100pk"]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE
+    )
+    coordinator._pins["centrum advance adult 100pk"] = price_coordinator.ProductPin(
+        chain="paknsave", query="Centrum advance Adult 100pk", grocer_product_id=45610
+    )
+
+    snapshot = asyncio.run(coordinator._async_update_data())
+
+    assert (
+        snapshot.quotes["centrum advance adult 100pk"].product_id == "catalogue:45610"
+    )
+
+
+def test_a_catalogue_match_is_never_cached_as_an_automatic_pin(monkeypatch) -> None:
+    """An automatic pin records a retailer id a search could later honour.
+
+    A catalogue id is not one, so caching it would leave the item unresolvable
+    on the next cycle.
+    """
+
+    summaries = [CENTRUM_ITEM]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE
+    )
+    coordinator._ranker = SimpleNamespace(
+        async_pick=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("a catalogue answer is not an ambiguity")
+        )
+    )
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.pin_for(CENTRUM_ITEM) is None
+
+
+def test_an_unresolvable_retailer_pin_is_not_replaced_by_the_catalogue(
+    monkeypatch,
+) -> None:
+    """A pin is a decision, so a missing product stays missing, not substituted."""
+
+    summaries = [CENTRUM_ITEM]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE
+    )
+    coordinator._pins["centrum advance adult 100pk (not 50+)"] = (
+        price_coordinator.ProductPin(
+            chain="paknsave", product_id="5035186-EA-000", product_name="Gone"
+        )
+    )
+
+    snapshot = asyncio.run(coordinator._async_update_data())
+
+    assert snapshot.quotes == {}
+    assert snapshot.failed == {"centrum advance adult 100pk (not 50+)"}

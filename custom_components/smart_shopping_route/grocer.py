@@ -36,7 +36,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import GROCER_MIRROR_DIR, GROCER_STORE_REFRESH_HOURS
 from .parquet import ParquetError, read_columns
-from .prices import size_from_text
+from .prices import name_tokens, size_from_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,6 +79,17 @@ def _sizes_compatible(wanted: str, candidate: str) -> bool:
 
 
 MAX_HISTORY_POINTS = 400
+
+
+def _display_name(name: str) -> str:
+    """Title-case a catalogue slug for display.
+
+    Slugs are lowercase and hyphenated. Capitalising after a space or hyphen but
+    not after an apostrophe keeps "Weet-Bix" and "Wattie's" readable instead of
+    producing "Wattie'S".
+    """
+
+    return re.sub(r"(?<![\w'])(\w)", lambda match: match.group(1).upper(), name)
 
 
 _PRODUCT_URL_RE = re.compile(r"/product/(\d+)/([^/?#]+)")
@@ -170,6 +181,10 @@ class GrocerData:
         self._stores: dict[int, str] | None = None
         self._store_prices: dict[int, dict[int, GrocerPrice]] = {}
         self._names: dict[int, str] | None = None
+        # Word index over the products a store prices, built once per mirror
+        # generation: a store lists ~11k products, and every unmatched item
+        # would otherwise compare its words with all of them.
+        self._catalogue: dict[int, dict[str, tuple[int, ...]]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         # Parquet reads run in executor threads and are pure Python, so they are
         # safe to run concurrently; no shared database handle exists any more.
@@ -208,6 +223,7 @@ class GrocerData:
                 return False
             self._names = None
             self._mirror_bytes = None
+            self._catalogue.clear()
             return True
 
     @staticmethod
@@ -244,7 +260,6 @@ class GrocerData:
 
     def names(self) -> dict[int, str]:
         """Return ``{product_id: name}`` from the mirrored sitemap index."""
-
         if self._names is not None:
             return self._names
         path = self._dir / NAMES_FILE
@@ -340,6 +355,7 @@ class GrocerData:
                 _LOGGER.debug("grocer.nz store sync failed: %s", err)
                 return False
             self._store_prices.pop(store_id, None)
+            self._catalogue.pop(store_id, None)
             return True
 
     def store_prices(self, store_id: int) -> dict[int, GrocerPrice]:
@@ -378,6 +394,66 @@ class GrocerData:
             )
         self._store_prices[store_id] = prices
         return prices
+
+    def _catalogue_index(self, store_id: int) -> dict[str, tuple[int, ...]]:
+        """Map name words to the products this store prices, cached per store.
+
+        A flat catalogue scan has no relevance order to break ties with, so the
+        lookup is a word index rather than a similarity scan over every product:
+        only names sharing a word with the item are ever scored.
+        """
+
+        if store_id in self._catalogue:
+            return self._catalogue[store_id]
+        prices = self.store_prices(store_id)
+        names = self.names()
+        index: dict[str, list[int]] = {}
+        for product_id in prices:
+            label = names.get(product_id)
+            if not label:
+                continue
+            for token in name_tokens(label):
+                index.setdefault(token, []).append(product_id)
+        built = {token: tuple(ids) for token, ids in index.items()}
+        self._catalogue[store_id] = built
+        return built
+
+    def catalogue_candidates(
+        self, store_id: int, tokens: set[str], include: int | None = None
+    ) -> list[tuple[int, str, GrocerPrice]]:
+        """Products this store prices whose catalogue name shares a word.
+
+        This is the discovery side of a retailer whose search index does not
+        cover everything on its shelves: the store's own price file says which
+        products it sells, and the sitemap index names them. ``include`` adds one
+        product regardless of its words, which is how an explicit pin stays
+        authoritative.
+        """
+
+        index = self._catalogue_index(store_id)
+        prices = self.store_prices(store_id)
+        names = self.names()
+        candidates = {
+            product_id for token in tokens for product_id in index.get(token, ())
+        }
+        if include is not None:
+            candidates.add(include)
+        found: list[tuple[int, str, GrocerPrice]] = []
+        for product_id in sorted(candidates):
+            label = names.get(product_id)
+            row = prices.get(product_id)
+            if label and row is not None:
+                found.append((product_id, _display_name(label), row))
+        return found
+
+    async def async_catalogue_candidates(
+        self, store_id: int, tokens: set[str], include: int | None = None
+    ) -> list[tuple[int, str, GrocerPrice]]:
+        """Return catalogue candidates with the parquet read off the loop."""
+
+        return await self.hass.async_add_executor_job(
+            self.catalogue_candidates, store_id, tokens, include
+        )
 
     # -- history ----------------------------------------------------------
 

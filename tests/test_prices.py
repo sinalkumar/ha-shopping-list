@@ -25,8 +25,10 @@ from smart_shopping_route.prices import (
     WoolworthsPriceClient,
     alternatives,
     best_match,
+    catalogue_product_id,
     create_client,
     excluded_tokens,
+    lookup_tokens,
     match_score,
     search_term,
     shortlist,
@@ -471,6 +473,7 @@ def test_price_diagnostics_expose_counts_only(monkeypatch) -> None:
         "ai_match",
         "automatic_pins",
         "items_with_history",
+        "store_catalogue_items",
         "grocer_history",
         "grocer_mirror_bytes",
         "refresh_hours",
@@ -2735,3 +2738,28 @@ def test_an_unpriced_item_gets_no_alternatives_from_another_family() -> None:
     assert [option.product_id for option in options] == [
         "Centrum Advance Adults 100 Tablets"
     ]
+
+
+# --- looking a name up in the store's own catalogue -------------------------
+
+
+def test_lookup_tokens_drop_the_size_and_the_rule_out() -> None:
+    """Words to find a catalogue name by, not the item's instructions.
+
+    A catalogue spells the size out ("100 tablets"), so "100pk" matches nothing,
+    and "not 50" would surface the very formulation the item excludes.
+    """
+
+    assert lookup_tokens("Centrum advance Adult 100pk (not 50+)") == {
+        "centrum",
+        "advance",
+        "adult",
+    }
+
+
+def test_a_catalogue_id_is_not_a_retailer_product_id() -> None:
+    """The two id spaces must never be confused, or a pin stops resolving."""
+
+    assert catalogue_product_id("catalogue:45609") == 45609
+    assert catalogue_product_id("5035186-EA-000") is None
+    assert catalogue_product_id("catalogue:not-a-number") is None

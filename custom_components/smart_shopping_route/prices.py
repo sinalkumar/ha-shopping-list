@@ -54,6 +54,10 @@ AI_SHORTLIST_MAX = 12
 # How many value alternatives are shown beside a match. Five is enough to
 # compare brands and pack formats without turning the row into a catalogue.
 ALTERNATIVE_COUNT = 5
+# A product found in the store's own price catalogue carries this prefix. Its id
+# comes from a different namespace than a retailer product id, so the two can
+# never be confused: offering one as the other would make a pin unresolvable.
+CATALOGUE_ID_PREFIX = "catalogue:"
 _SCORE_EPSILON = 1e-9
 _VALUE_EPSILON = 1e-9
 
@@ -428,6 +432,39 @@ def match_score(summary: str, candidate: str) -> float:
         ):
             matched += 1
     return matched / len(item_tokens)
+
+
+def name_tokens(name: str) -> set[str]:
+    """Words in a catalogue name, for indexing the store's own product list."""
+
+    return set(_tokens(name))
+
+
+def lookup_tokens(summary: str) -> set[str]:
+    """Words worth looking a catalogue product up by.
+
+    The pack size is a constraint rather than a search word -- a catalogue name
+    spells it out ("100 tablets"), it does not carry "100pk" -- and a ruled-out
+    quantity is an instruction, so neither belongs in a lookup: keeping "not
+    50" would surface exactly the product the item excludes.
+    """
+
+    ignored = _size_tokens(summary)
+    for negation, quantity in _negation_pairs(summary):
+        ignored.add(negation)
+        ignored.add(quantity)
+    return {token for token in _tokens(summary) if token not in ignored}
+
+
+def catalogue_product_id(product_id: str) -> int | None:
+    """Return the grocer.nz product id behind a catalogue quote, if it has one."""
+
+    if not product_id.startswith(CATALOGUE_ID_PREFIX):
+        return None
+    try:
+        return int(product_id.removeprefix(CATALOGUE_ID_PREFIX))
+    except ValueError:
+        return None
 
 
 def search_term(summary: str, *, keep_qualifier: bool = False) -> str:

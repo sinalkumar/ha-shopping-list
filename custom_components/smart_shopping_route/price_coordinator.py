@@ -47,9 +47,23 @@ from .const import (
     PRICE_WEEKLY_REFRESH_HOUR,
     PRICE_WEEKLY_REFRESH_WEEKDAY,
 )
-from .grocer import GrocerData, GrocerError
+from .grocer import GrocerData, GrocerError, GrocerPrice
 from .models import normalize_summary
-from .prices import PriceClient, PriceError, PriceQuote, ProductPin, create_client
+from .prices import (
+    CATALOGUE_ID_PREFIX,
+    CHAIN_PAKNSAVE,
+    PriceClient,
+    PriceError,
+    PriceQuote,
+    ProductPin,
+    alternatives,
+    best_match,
+    catalogue_product_id,
+    compute_unit_price,
+    create_client,
+    lookup_tokens,
+    size_from_text,
+)
 from .storage import PriceStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -297,6 +311,9 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._backfilled: set[str] = set()
         self._backfill_attempts: set[str] = set()
         self._matched_products: dict[str, int] = {}
+        # Items whose price came from the store catalogue rather than a search,
+        # kept so diagnostics can answer "where did this price come from?".
+        self._catalogue_sourced: set[str] = set()
         self._last_store_sync = 0.0
         self._mirror_bytes: int | None = None
         self._price_store = PriceStore(hass, entry.entry_id)
@@ -397,7 +414,9 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         """Import multi-year history for a validated grocer.nz match.
 
         Automatic matching requires unambiguous name/pack/price evidence.
-        Otherwise only an explicit history product pin may import a series.
+        Otherwise only an explicit history product pin may import a series. A
+        catalogue-sourced quote is a third case: its product id *is* the store's
+        grocer product, so there is nothing left to match by name.
         """
 
         if (
@@ -412,11 +431,17 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         # not be attempted again.
         version = self._pin_versions.get(key, 0)
         pin = self._pins.get(key)
-        if pin is not None and pin.grocer_product_id:
-            # An explicit choice: use exactly that product's history.
+        known_product = (
+            pin.grocer_product_id
+            if pin is not None and pin.grocer_product_id
+            else catalogue_product_id(quote.product_id)
+        )
+        if known_product:
+            # An explicit choice, or a catalogued product already identified:
+            # use exactly that product's history.
             try:
                 match = await self.grocer.async_pinned_match(
-                    self.grocer_store_id, pin.grocer_product_id
+                    self.grocer_store_id, known_product
                 )
             except GrocerError as err:
                 _LOGGER.debug("grocer.nz pinned history failed: %s", err)
@@ -992,6 +1017,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 self._snapshot.drops_now.pop(key, None)
                 self._snapshot.store_history.pop(key, None)
                 self._matched_products.pop(key, None)
+                self._catalogue_sourced.discard(key)
                 # The item is gone, so its imported history went with it. A
                 # re-added item must import again; otherwise the cached flag
                 # silently suppresses its store history until the next mirror
@@ -1057,6 +1083,17 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             raise
         if self._closed or version != self._pin_versions.get(key, 0):
             return
+        catalogue = False
+        if quote is None:
+            # The retailer could not resolve the item. Its search index does not
+            # list everything the store sells, so the store's own catalogue gets
+            # the last word before the item is left unpriced.
+            quote, catalogue_found = await self._async_catalogue_quote(summary, pin)
+            if self._closed or version != self._pin_versions.get(key, 0):
+                return
+            if quote is not None:
+                catalogue = True
+                found = catalogue_found
         self._attempts.pop(key, None)
         self._backoff_until.pop(key, None)
         self._snapshot.errors.discard(key)
@@ -1067,6 +1104,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             # decision: drop it so the next cycle can match afresh instead of
             # leaving the item unpriced until someone notices.
             self._snapshot.failed.add(key)
+            self._catalogue_sourced.discard(key)
             self._snapshot.quotes.pop(key, None)
             self._snapshot.observed_at.pop(key, None)
             self._snapshot.drops_now.pop(key, None)
@@ -1082,19 +1120,105 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             self._schedule_retry(key)
             return
         self._snapshot.failed.discard(key)
+        if catalogue:
+            self._catalogue_sourced.add(key)
+        else:
+            self._catalogue_sourced.discard(key)
         if found:
             self._snapshot.alternatives[key] = found
         else:
             self._snapshot.alternatives.pop(key, None)
         # Remember an AI tie-break so the choice cannot flip between refreshes.
         # A flip would rewrite the price series on every cycle, which is exactly
-        # the history the drop detection is built on.
-        if self._ranker is not None and self._pins.get(key) is None:
+        # the history the drop detection is built on. A catalogue answer is not a
+        # tie-break: it is deterministic and re-resolves identically next cycle,
+        # and its id is not a retailer id a search could honour.
+        if self._ranker is not None and not catalogue and self._pins.get(key) is None:
             await self._remember_auto_pin(key, summary, quote)
-        self._record_history(key, quote)
+        # The catalogue file was last verified when the mirror was synced, not
+        # now, so the row's age is measured from that instead of overstating it.
+        observed = time.time()
+        if catalogue and self._last_store_sync:
+            observed = self._last_store_sync
+        self._record_history(key, quote, observed_at=observed)
         self._snapshot.quotes[key] = quote
-        self._snapshot.observed_at[key] = time.time()
+        self._snapshot.observed_at[key] = observed
         await self._async_backfill(key, quote)
+
+    async def _async_catalogue_quote(
+        self, summary: str, pin: ProductPin | None
+    ) -> tuple[PriceQuote | None, list[PriceQuote]]:
+        """Price an item from the store's own catalogue, or return nothing.
+
+        A retailer's search index does not cover everything its stores sell:
+        in-store-only lines such as vitamins are priced at the store but absent
+        from the online search, so the right product never appears and the item
+        stays unpriced even though it is on the shelf. grocer.nz mirrors the
+        store's own per-store price file, which does carry them.
+
+        Only Pak'nSave is served this way. An anonymous Woolworths quote is an
+        online price, not a shelf price for the chosen store, so mixing the two
+        scopes would compare prices from two different shops.
+
+        The same relevance floor a search hit must clear applies here, so a
+        catalogue name has to be as good an answer as a result row would be.
+        """
+
+        if self.grocer_store_id is None or self.chain != CHAIN_PAKNSAVE:
+            return None, []
+        if pin is not None and pin.product_id:
+            # A pin names one exact retailer product. The catalogue has no way to
+            # honour that id, and matching its query text instead would quietly
+            # replace the household's decision with a guess.
+            return None, []
+        text = pin.match_target if pin is not None and pin.match_target else summary
+        pinned_product = (
+            pin.grocer_product_id if pin is not None and pin.grocer_product_id else None
+        )
+        try:
+            rows = await self.grocer.async_catalogue_candidates(
+                self.grocer_store_id, lookup_tokens(text), pinned_product
+            )
+        except (GrocerError, OSError) as err:
+            _LOGGER.debug("grocer.nz store catalogue lookup failed: %s", err)
+            return None, []
+        quotes = [
+            self._catalogue_quote(product_id, label, row)
+            for product_id, label, row in rows
+        ]
+        if pinned_product is not None:
+            match = next(
+                (
+                    quote
+                    for quote in quotes
+                    if quote.product_id == f"{CATALOGUE_ID_PREFIX}{pinned_product}"
+                ),
+                None,
+            )
+        else:
+            match = best_match(text, quotes)
+        if match is None:
+            return None, []
+        return match, alternatives(text, quotes)
+
+    def _catalogue_quote(
+        self, product_id: int, label: str, row: GrocerPrice
+    ) -> PriceQuote:
+        """Present a store catalogue row as a quote for one item.
+
+        No was-price is claimed: the catalogue states a shelf price, not a
+        retailer's reference, and a discount nobody verified is worse than none.
+        """
+
+        size = size_from_text(label)
+        return PriceQuote(
+            chain=self._chain_key,
+            product_id=f"{CATALOGUE_ID_PREFIX}{product_id}",
+            product_name=label,
+            price=row.effective,
+            size=size[0] if size else None,
+            unit_price=compute_unit_price(row.effective, size),
+        )
 
     async def _remember_auto_pin(
         self, key: str, summary: str, quote: PriceQuote
@@ -1111,7 +1235,9 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         )
         await self._async_persist()
 
-    def _record_history(self, key: str, quote: PriceQuote) -> None:
+    def _record_history(
+        self, key: str, quote: PriceQuote, *, observed_at: float | None = None
+    ) -> None:
         """Append an observation, then derive the drop from the series.
 
         The series is recorded before the quote is replaced, so the reference
@@ -1120,7 +1246,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
 
         self._bind_history(key, quote)
         series = self._snapshot.history.setdefault(key, [])
-        now = time.time()
+        now = time.time() if observed_at is None else observed_at
         last = series[-1] if series else None
 
         # Derive the drop from the observation before this one. The new price is
@@ -1207,6 +1333,8 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             "ai_match": self.ai_match_enabled,
             "automatic_pins": sum(1 for pin in self._pins.values() if pin.is_auto),
             "items_with_history": len(self._snapshot.history),
+            # "Where did this price come from?" answered without a log dive.
+            "store_catalogue_items": len(self._catalogue_sourced),
             "grocer_history": self.history_enabled,
             "grocer_mirror_bytes": (
                 self._mirror_bytes if self._mirror_bytes is not None else 0

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.18
+
+- Price an item the search index does not list, from the store's own price file.
+  Pak'nSave stocks the plain Centrum Advance Adults 100 tablets at its Ormiston
+  store ($24.99), but its online search returns only the 60pk and the 50+ box, so
+  a correct item -- "Centrum advance Adult 100pk (not 50+)" -- stayed unpriced
+  while the product sat on the shelf. The store's price file, which is already
+  mirrored for history, does carry it, so it is now the last resort after the
+  retailer search: the same word-matching floor picks the product, the same pack
+  size and rule-out constraints still apply, and the quote is bound to that exact
+  product's history instead of being matched again by name.
+- Leave the ID spaces apart. A catalogued quote carries a `catalogue:` product id,
+  so it can never be mistaken for a retailer id a search or a pin would honour.
+  A catalogue answer is also never cached as an automatic pin, and an exact
+  retailer pin is still refused rather than substituted, because a pin is a
+  decision and not a hint.
+- Keep the two scopes apart. Only Pak'nSave is priced this way: an anonymous
+  Woolworths quote is an online price, and using a physical store's shelf price
+  there would compare two different shops.
+- Measure the row's age from the mirror sync that verified the price, not from
+  the refresh that read it, so a catalogue quote cannot overstate its freshness.
+  `store_catalogue_items` in diagnostics counts them. Catalogue names come from
+  grocer.nz slugs, so such a row may show the product without its brand.
+
 ## 0.8.17
 
 - Make the alternatives readable in the native list. Home Assistant renders a
