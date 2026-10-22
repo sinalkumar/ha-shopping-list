@@ -22,7 +22,8 @@
 - Measure the row's age from the mirror sync that verified the price, not from
   the refresh that read it, so a catalogue quote cannot overstate its freshness.
   `store_catalogue_items` in diagnostics counts them. Catalogue names come from
-  grocer.nz slugs, so such a row may show the product without its brand.
+  grocer.nz slugs, so such a row may show the product without its brand, and its
+  pack size is printed the way the catalogue writes it.
 
 ## 0.8.17
 
