@@ -163,9 +163,11 @@ class SmartShoppingRouteTodo(TodoListEntity):
         key = normalize_summary(item.summary or "")
         if quote is None:
             # A searched item with no confident match is silent otherwise, and
-            # silence reads as a bug. Say so, and say what fixes it.
+            # silence reads as a bug. Say so plainly: this description lands in a
+            # native to-do list too, where refresh/rename/pin do not exist, so
+            # the guidance lives in the card that has those controls.
             if key in snapshot.failed:
-                return "no price match — refresh, rename or pin this item"
+                return "no price match"
             return None
         parts = [f"${quote.price:.2f}"]
 
@@ -183,7 +185,11 @@ class SmartShoppingRouteTodo(TodoListEntity):
             parts.append(quote.size)
         if quote.unit_price:
             parts.append(quote.unit_price)
-        parts.append(quote.product_name)
+        parts.append(
+            f"{quote.product_name} (store price file)"
+            if quote.from_store_file
+            else quote.product_name
+        )
         line = " · ".join(parts)
         better = self._alternatives_line(item.summary or "", quote)
         return f"{line}\n{better}" if better else line

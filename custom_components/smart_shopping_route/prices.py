@@ -206,6 +206,16 @@ class PriceQuote:
             return 0.0
         return round(self.was_price - self.price, 2)
 
+    @property
+    def from_store_file(self) -> bool:
+        """True when this row came from a store's own price catalogue.
+
+        The origin is part of trusting a row: a store price file states a shelf
+        price, and its catalogue name may not carry the product's brand.
+        """
+
+        return catalogue_product_id(self.product_id) is not None
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "chain": self.chain,
@@ -218,6 +228,7 @@ class PriceQuote:
             "on_promotion": self.on_promotion,
             "size": self.size,
             "unit_price": self.unit_price,
+            "from_store_file": self.from_store_file,
         }
 
 

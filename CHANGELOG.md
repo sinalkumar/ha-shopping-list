@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.19
+
+- Show what a price is for. The card row now names the matched product under the
+  price, as the native list already did, instead of hiding it behind a per-row
+  disclosure — the row is only useful if you can see which product it priced.
+- Say where a price came from. A row priced from a store's own price file is
+  labelled `store price file` next to the product name, in the card and in the
+  native list, because those catalogue names may not carry the product's brand.
+- Show the value ranking on the card. **Better value per unit** lists the same
+  per-unit comparison the native list prints, with `(this item)` marking the
+  current pick, so deciding between brands no longer needs a second view.
+- Stop faking an editable field. A source list that cannot store notes now shows
+  the notes box visibly disabled; before, our own input styling outranked the
+  browser's and an unwritable box looked exactly like one that saves.
+- Make **Move to section** a deliberate choice. The picker starts unchosen and
+  keeps `Current: <section>` as its placeholder; before, the current section was
+  preselected, so the placeholder was unreachable and pressing the button
+  silently "moved" the item to where it already was.
+- Collapse the one-time notice about older preserved history to a single
+  expandable line, so it stops pushing the first item down the card.
+- Trim the unmatched-item wording to `no price match`. It appears in a native
+  to-do list too, where refreshing, renaming and pinning do not exist; the card,
+  which does have those controls, keeps the fuller hint.
+
 ## 0.8.18
 
 - Price an item the search index does not list, from the store's own price file.

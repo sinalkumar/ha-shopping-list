@@ -367,3 +367,83 @@ test("a transient unavailable blip keeps expanded rows expanded", async (t) => {
   assert.equal(card.shadowRoot.querySelector("details").open, true,
     "an unavailable blip must not forget what the household had open");
 });
+
+test("a row shows the product its price belongs to, and where the price came from", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.items[0].price.product_name = "Advance Adults Daily Multivitamin Supplement 100 Tablets";
+  data.items[0].price.from_store_file = true;
+  await card._load();
+  const identity = card.shadowRoot.querySelector(".identity");
+  assert.match(identity.textContent, /Advance Adults Daily Multivitamin Supplement 100 Tablets/);
+  assert.match(identity.textContent, /store price file/);
+});
+
+test("a search-sourced row carries no provenance marker", async (t) => {
+  const { card } = fixture(t); await settle(card);
+  const identity = card.shadowRoot.querySelector(".identity");
+  assert.equal(identity.textContent, "Example milk 2L");
+});
+
+test("the value ranking the native list prints is readable on the card too", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.items[0].alternatives = [
+    { product_id: "p1", product_name: "Essentials Milk 2L", unit_price: "$1.40/L" },
+    { product_id: "p0", product_name: "Example milk 2L", unit_price: "$2.00/L" },
+  ];
+  data.items[0].price.product_id = "p0";
+  await card._load();
+  const summary = [...card.shadowRoot.querySelectorAll("summary")].find((element) => element.textContent === "Better value per unit");
+  const list = summary.parentElement;
+  assert.match(list.textContent, /\$1\.40\/L · Essentials Milk 2L/);
+  assert.match(list.textContent, /\$2\.00\/L \(this item\)/);
+});
+
+test("a single option is not offered as a ranking", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.items[0].alternatives = [{ product_id: "p0", product_name: "Example milk 2L", unit_price: "$2.00/L" }];
+  await card._load();
+  assert.equal([...card.shadowRoot.querySelectorAll("summary")].some((element) => element.textContent === "Better value per unit"), false);
+});
+
+test("one-time history notice collapses to a single line", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.legacy_history_preserved = true;
+  await card._load();
+  const status = card.shadowRoot.querySelector(".status");
+  const notice = [...status.querySelectorAll("details")].find((element) => /Older price history/.test(element.textContent));
+  assert.equal(notice.open, false);
+  assert.match(notice.querySelector("summary").textContent, /Older price history is kept but not compared/);
+});
+
+test("a disabled notes field looks disabled", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.source_features = 71 & ~64;  // description updates unsupported
+  await card._load();
+  button(card.shadowRoot, "Edit").click();
+  const notes = field(card._dialog, "Notes");
+  assert.equal(notes.disabled, true);
+  assert.match(card._dialog.textContent, /does not support notes/);
+  assert.match(source, /:disabled\s*\{[^}]*opacity/);
+});
+
+test("the section picker starts unchosen so a move is a deliberate choice", async (t) => {
+  const { card, calls } = fixture(t); await settle(card);
+  button(card.shadowRoot, "Edit").click();
+  const section = field(card._dialog, "Section");
+  assert.equal(section.value, "");
+  assert.match(section.options[0].textContent, /Current: Dairy — choose section/);
+  button(card._dialog, "Move to section").click(); await settle(card);
+  assert.match(card._dialog.querySelector(".error").textContent, /Choose a section first/);
+  assert.equal(calls.some((call) => call.service === "set_item_section"), false);
+});
+
+test("after a move the picker returns to unchosen", async (t) => {
+  const { card } = fixture(t); await settle(card);
+  button(card.shadowRoot, "Edit").click();
+  const section = field(card._dialog, "Section");
+  section.value = "Drinks"; section.dispatchEvent(new card.ownerDocument.defaultView.Event("change", { bubbles: true }));
+  button(card._dialog, "Move to section").click(); await settle(card);
+  assert.equal(section.value, "");
+  assert.match(section.options[0].textContent, /Current: Drinks — choose section/);
+  assert.match(card._dialog.querySelector(".status-note").textContent, /Moved to Drinks/);
+});

@@ -317,13 +317,19 @@ def test_priced_item_shows_the_price_directly_above_notes() -> None:
 
 
 def test_a_searched_item_without_a_match_says_so() -> None:
-    """Silence reads as a bug, so an unmatched item explains itself."""
+    """Silence reads as a bug, so an unmatched item explains itself.
+
+    The wording stays surface-neutral: this description also lands in a native
+    to-do list, where refreshing, renaming and pinning do not exist. The card,
+    which does have those controls, carries the fuller hint.
+    """
 
     entity, coordinator = make_entity()
     coordinator.prices = FakePrices(failed={"milk"})
     displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
     assert displayed.description.startswith("<!-- ssr-price:start sha256=")
-    assert "no price match — refresh, rename or pin this item" in displayed.description
+    assert "no price match" in displayed.description
+    assert "refresh, rename or pin" not in displayed.description
 
 
 def test_an_item_that_has_not_been_searched_stays_quiet() -> None:

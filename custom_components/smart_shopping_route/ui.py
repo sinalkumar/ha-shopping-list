@@ -64,6 +64,9 @@ def route_payload(coordinator: Any, *, can_control: bool) -> dict[str, Any]:
         quote = prices.quote_for(item.summary or "") if not completed else None
         previous = snapshot.reference_point(key) if quote else None
         pin = prices.pin_for(item.summary or "")
+        # The card renders the same value ranking the native list describes, so a
+        # shopper gets one answer whichever surface they open.
+        options = prices.alternatives_for(item.summary or "") if quote else []
         rows.append({
             "uid": item.uid,
             "summary": item.summary or "",
@@ -76,6 +79,14 @@ def route_payload(coordinator: Any, *, can_control: bool) -> dict[str, Any]:
             "completed": completed,
             "section": coordinator.section_for(item),
             "price": quote.as_dict() if quote else None,
+            "alternatives": [
+                {
+                    "product_id": option.product_id,
+                    "product_name": option.product_name,
+                    "unit_price": option.unit_price,
+                }
+                for option in options
+            ],
             "stale": snapshot.stale_for(key) if quote else False,
             "observed_at": snapshot.observed_at.get(key),
             "previous": {"price": previous.price, "ts": previous.ts}

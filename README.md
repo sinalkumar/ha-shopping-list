@@ -88,9 +88,11 @@ type: custom:smart-shopping-route-card
 entity: todo.example_supermarket
 ```
 
-The card has a prominent price/size/unit row, expandable matched-product and
-historical observations, original notes, and an explicit basket coverage/freshness
-banner. **Edit** provides note/name editing, **Move to section**, **Wrong product?**
+The card has a prominent price/size/unit row with the matched product named
+underneath it, expandable price history, the same per-unit value ranking the
+native list prints, original notes, and an explicit basket coverage/freshness
+banner. A row priced from the store's own price file says so on that line, because
+those catalogue names may not carry the brand. **Edit** provides note/name editing, **Move to section**, **Wrong product?**
 search/product/history pins, reset matching, and confirmed deletion. Prices are
 read-only, with no floating button covering the last row. Duplicate names retain
 independent source UIDs; product pins apply to every occurrence of the same name.
@@ -169,7 +171,7 @@ Both chains publish the new week's prices between Sunday morning and Monday 05:0
 
 Item names are matched to retailer product titles by comparing words, so `Weetbix` finds `Weet-Bix`, and `Toilet paper` finds `Toilet Tissues`. When an item has a bracketed qualifier the plain term is searched first and the qualifier is added only if nothing good is found, which keeps `Tuna (olive oil)` from resolving to a bottle of olive oil. Each search keeps the retailer's top 20 candidates, because a qualifier variant can rank below the first handful of hits. A candidate must match enough of the item's words or **no price is shown**: showing nothing is better than showing the wrong product.
 
-An item that was searched and found nothing reads `no price match — refresh, rename or pin this item` instead of staying silent. Rename it to words the retailer uses, pin the product, or press the profile's refresh button to search again.
+An item that was searched and found nothing reads `no price match` instead of staying silent. The card adds how to fix it, since it has the controls: refresh, rename the item to words the retailer uses, or pin the product.
 
 A retailer's search index does not list everything its stores sell. In-store-only
 lines such as vitamins are priced at the store but absent from the online search,
@@ -308,7 +310,7 @@ Locally, the profile cache persists normalized item summaries and their sections
 - **Items stay unclassified:** test the selected AI Task in Home Assistant, press the refresh button, and inspect sanitized Home Assistant logs. The status sensor's `pending_classifications` and `scheduled_retries` attributes show whether work is queued or backing off.
 - **Wrong section:** use **Edit → Move to section** in the shopping card, or call `set_item_section` with a source UID.
 - **An item shows no price:** use **Edit → Wrong product?** to pin a better search without renaming the source item. The coverage banner distinguishes unpriced, partial and stale estimates. A blank history may need an explicit grocer product pin.
-- **Want to see the value ranking:** each priced row carries an "Alternatives by unit price" line listing up to five products that satisfy the same constraints, cheapest per unit first, with the chosen product marked `(this item)` where its value places it. It appears only when the item states a pack size, because a per-unit price of a differently sized product is a different purchase rather than a cheaper one, and only for products that are the same thing — the qualifier in brackets has to match too, so `(olive oil)` is never compared against another flavour.
+- **Want to see the value ranking:** each priced row in the native list carries an "Alternatives by unit price" line, and the card shows the same ranking under **Better value per unit**, listing up to five products that satisfy the same constraints, cheapest per unit first, with the chosen product marked `(this item)` where its value places it. It appears only when the item states a pack size, because a per-unit price of a differently sized product is a different purchase rather than a cheaper one, and only for products that are the same thing — the qualifier in brackets has to match too, so `(olive oil)` is never compared against another flavour.
 - **Prices look like the wrong product:** pin the item with `pin_item_product` and, if needed, its exact `product_id`. Matching prefers the retailer's own relevance order, so the plainest product usually wins. A pack size or a ruled-out variant such as `(not 50+)` is enforced before any match is accepted, so an item that still resolves wrongly is a naming difference worth pinning.
 - **Changed hints:** call `reclassify_all` if you want new classifications; route order changes alone need no reclassification.
 - **Debugging:** enable debug logging for `custom_components.smart_shopping_route`. Logs intentionally omit item summaries.

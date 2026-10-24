@@ -208,3 +208,78 @@ def test_an_unnamed_store_falls_back_to_a_neutral_label(monkeypatch) -> None:
     payload = ui.route_payload(coordinator, can_control=True)
 
     assert payload["price_store"] == "Current-price store"
+
+
+def test_the_payload_carries_the_value_ranking_the_card_shows(monkeypatch) -> None:
+    """The card must not be the one surface with the ranking missing."""
+
+    coordinator = route(monkeypatch)
+    coordinator.prices.snapshot.alternatives["milk"] = [
+        PriceQuote(
+            "paknsave", "1", "Example Milk 2L", 4, size="2L", unit_price="$2.00/L"
+        ),
+        PriceQuote(
+            "paknsave", "2", "Essentials Milk 2L", 3, size="2L", unit_price="$1.50/L"
+        ),
+    ]
+
+    payload = ui.route_payload(coordinator, can_control=True)
+
+    # Order is the ranker's answer, already covered where ranking is tested; here
+    # the point is that the card receives the same options at all.
+    assert {option["product_id"] for option in payload["items"][0]["alternatives"]} == {
+        "1",
+        "2",
+    }
+    assert {option["unit_price"] for option in payload["items"][0]["alternatives"]} == {
+        "$2.00/L",
+        "$1.50/L",
+    }
+
+
+def test_the_payload_says_when_a_price_came_from_a_store_price_file(
+    monkeypatch,
+) -> None:
+    """A brand-less catalogue name needs its origin to make sense on a row."""
+
+    searched = route(monkeypatch)
+    assert (
+        ui.route_payload(searched, can_control=True)["items"][0]["price"][
+            "from_store_file"
+        ]
+        is False
+    )
+
+    surfaced = route(monkeypatch)
+    surfaced.prices.snapshot.quotes["milk"] = PriceQuote(
+        "paknsave",
+        "catalogue:45609",
+        "Advance Adults Daily Multivitamin Supplement 100 Tablets",
+        24.99,
+        size="100tablets",
+        unit_price="$0.25/ea",
+    )
+
+    price = ui.route_payload(surfaced, can_control=True)["items"][0]["price"]
+
+    assert price["from_store_file"] is True
+    assert price["product_id"] == "catalogue:45609"
+
+
+def test_the_native_list_labels_a_store_file_price(monkeypatch) -> None:
+    """The brand is missing from a catalogue name, so the origin is stated."""
+
+    coordinator = route(monkeypatch)
+    coordinator.prices.snapshot.quotes["milk"] = PriceQuote(
+        "paknsave",
+        "catalogue:45609",
+        "Advance Adults Daily Multivitamin Supplement 100 Tablets",
+        24.99,
+        size="100tablets",
+        unit_price="$0.25/ea",
+    )
+
+    row = ui.route_payload(coordinator, can_control=True)["items"][0]
+
+    assert row["price"]["product_name"].startswith("Advance Adults")
+    assert row["price"]["from_store_file"] is True

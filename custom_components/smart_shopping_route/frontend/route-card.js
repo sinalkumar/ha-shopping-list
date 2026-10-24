@@ -29,6 +29,10 @@ class SmartShoppingRouteCard extends HTMLElement {
       button { min-height:44px; min-width:44px; padding:8px 12px; border:1px solid var(--divider-color,#aaa); border-radius:8px; background:var(--secondary-background-color,#eee); cursor:pointer; }
       button:disabled { opacity:.55; cursor:default; } input[type=checkbox] { width:24px; height:24px; margin:10px; flex-shrink:0; }
       input:not([type=checkbox]),textarea,select { width:100%; min-height:44px; padding:8px; border:1px solid var(--divider-color,#aaa); border-radius:6px; background:var(--card-background-color,#fff); }
+      /* A disabled field must read as disabled. Without this the border and
+         background above outrank the browser's own styling and an unwritable
+         notes box looks exactly like one that saves. */
+      input:disabled,select:disabled,textarea:disabled { opacity:.6; background:var(--secondary-background-color,#eee); color:var(--secondary-text-color,#555); cursor:not-allowed; }
       label { display:block; margin:12px 0; } label span { display:block; margin-bottom:6px; } textarea { min-height:88px; }
       form.add { display:flex; gap:8px; } form.add input { flex:1; min-width:0; }
       dialog { color:inherit; background:var(--card-background-color,#fff); border:1px solid var(--divider-color,#aaa); border-radius:12px; width:520px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 32px); padding:16px; box-sizing:border-box; }
@@ -36,6 +40,8 @@ class SmartShoppingRouteCard extends HTMLElement {
       .completed .name { text-decoration:line-through; } .error:empty { display:none; }
       .status-note { font-size:14px; margin:8px 0; color:var(--secondary-text-color,#555); } .status-note:empty { display:none; }
       .metadata { margin-top:4px; } .metadata summary { min-height:36px; display:list-item; }
+      .status details { margin-top:4px; } .status details summary { min-height:32px; display:list-item; }
+      .price { row-gap:2px; } .identity { margin-top:2px; }
       .error { white-space:pre-wrap; margin:8px 0; color:var(--error-color,#a00); }
       @media(max-width:440px) { ha-card {padding:12px;} .row {gap:4px;} .edit {padding:6px;} }
     `;
@@ -157,7 +163,14 @@ class SmartShoppingRouteCard extends HTMLElement {
       const status = node("div", undefined, "status"); status.setAttribute("role", "status");
       status.append(node("div", label), node("div", `${data.price_store} · Oldest quote: ${date(quality.oldest_quote_at)}`, "muted"));
       if (data.history_store) status.append(node("div", `History: ${data.history_store}`, "muted"));
-      if (data.legacy_history_preserved) status.append(node("div", "Older price history is backed up but not compared with current prices: its product or store identity is unverified. It stays until newer history replaces it.", "muted"));
+      if (data.legacy_history_preserved) {
+        // Kept, not dropped: it is a one-time explanation, so it collapses to a
+        // single line instead of pushing the first item off the visible card.
+        const legacy = node("details", undefined, "metadata");
+        legacy.append(node("summary", "Older price history is kept but not compared", "muted"));
+        legacy.append(node("p", "Its product or store identity is unverified, so it is not plotted against current prices. It stays until newer history replaces it.", "muted"));
+        status.append(legacy);
+      }
       card.append(status);
     }
     if (!data.available) card.append(node("p", "Source list unavailable. Saved prices may be stale.", "warning"));
@@ -199,13 +212,34 @@ class SmartShoppingRouteCard extends HTMLElement {
         if (item.price.size) price.append(node("span", item.price.size));
         if (item.price.unit_price) price.append(node("span", item.price.unit_price));
         body.append(price);
+        // The matched product belongs on the row, not behind a disclosure: it is
+        // what the price is for, and the native list already shows it.
+        if (item.price.product_name) {
+          const identity = node("div", `${item.price.product_name}`, "muted identity");
+          if (item.price.from_store_file) identity.append(" · store price file");
+          body.append(identity);
+        }
         if (item.stale) body.append(node("div", `Stale · checked ${date(item.observed_at)}`, "warning"));
         else if (item.price.was_price > item.price.price) body.append(node("div", `Was ${money(item.price.was_price)}`, "muted"));
         else if (item.previous?.price > item.price.price) body.append(node("div", `Previously seen ${money(item.previous.price)} · ${date(item.previous.ts)}`, "muted"));
+        if (item.alternatives?.length > 1) {
+          // Same ranking the native list prints, shown rather than described: a
+          // shopper deciding on the card should not have to open another view.
+          const better = node("details", undefined, "metadata");
+          better.append(node("summary", "Better value per unit"));
+          const list = node("ul");
+          for (const option of item.alternatives) {
+            const unit = option.unit_price || money(option.price);
+            const chosen = option.product_id === item.price.product_id ? " (this item)" : "";
+            list.append(node("li", `${unit}${chosen} · ${option.product_name}`));
+          }
+          better.append(list);
+          body.append(better);
+        }
         const details = node("details", undefined, "metadata");
         if (this._openDetails.has(item.uid)) details.open = true;
         details.addEventListener("toggle", () => { if (details.open) this._openDetails.add(item.uid); else this._openDetails.delete(item.uid); });
-        details.append(node("summary", "Product & history"), node("div", item.price.product_name, "muted"));
+        details.append(node("summary", "Price history"));
         for (const [points, label] of [[item.history, "Observed price history"], [item.store_history, `Physical-store history: ${data.history_store} (not compared with online quotes)`]]) {
           if (points?.length) {
             details.append(node("p", label, "muted"));
@@ -268,7 +302,10 @@ class SmartShoppingRouteCard extends HTMLElement {
     const section = this._field("Section", "", "select");
     const placeholder = node("option", `Current: ${item.section} — choose section`); placeholder.value = ""; placeholder.disabled = true; section.append(placeholder);
     for (const value of this._data.sections) { const option = node("option", value); option.value = value; section.append(option); }
-    section.value = this._data.sections.includes(item.section) ? item.section : "";
+    // Left unchosen on purpose. Preselecting the current section makes the
+    // placeholder unreachable and turns "Move to section" into a no-op move the
+    // household never asked for.
+    section.value = "";
     this._dialog.append(this._button("Move to section", async () => {
       if (!section.value) { this._dialogError.textContent = "Choose a section first."; return; }
       const target = section.value;
@@ -277,6 +314,7 @@ class SmartShoppingRouteCard extends HTMLElement {
       // Independent of the name/notes draft, so the editor stays open rather
       // than silently throwing those edits away.
       placeholder.textContent = `Current: ${target} — choose section`;
+      section.value = "";
       this._dialogStatus.textContent = this._dialogDirty() ? `Moved to ${target}. Your unsaved name and notes are still here.` : `Moved to ${target}.`;
     }));
     if (this._data.prices_enabled) {
