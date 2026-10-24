@@ -249,7 +249,14 @@ class SmartShoppingRouteCard extends HTMLElement {
           }
         }
         body.append(details);
-      } else if (data.prices_enabled && !item.completed) body.append(node("div", "no price match — refresh, rename or pin this item", "muted"));
+      } else if (data.prices_enabled && !item.completed) {
+        // Name only what this card can actually do. Pinning is a service, and
+        // telling someone here to "pin it" points at a control that is not on
+        // the screen.
+        body.append(node("div", "no price match — refresh, or edit the item to the words the store uses", "muted"));
+        const last = item.history?.[item.history.length - 1];
+        if (last) body.append(node("div", `Last seen ${money(last.price)} · ${date(last.ts)}`, "muted"));
+      }
       if (item.notes) body.append(node("div", item.notes, "notes"));
       row.append(check, body);
       if (this._can(4)) {

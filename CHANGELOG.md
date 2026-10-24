@@ -20,9 +20,11 @@
   silently "moved" the item to where it already was.
 - Collapse the one-time notice about older preserved history to a single
   expandable line, so it stops pushing the first item down the card.
-- Trim the unmatched-item wording to `no price match`. It appears in a native
-  to-do list too, where refreshing, renaming and pinning do not exist; the card,
-  which does have those controls, keeps the fuller hint.
+- Trim the unmatched-item wording to `no price match`, and add what was last
+  seen, e.g. `no price match · last seen $24.99 (2026-10-21)`. A bare miss hides
+  the one fact that helps. The card adds how to fix it, naming only what it can
+  actually offer — refresh and a reworded item — instead of pointing at a pin
+  control that is a service, not a button on the screen.
 
 ## 0.8.18
 

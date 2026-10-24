@@ -229,13 +229,19 @@ test("background price refresh does not erase unsaved notes", async (t) => {
   assert.equal(field(card._dialog, "Notes").value, "Unsaved text");
 });
 
-test("an unmatched row explains itself the same way the native list does", async (t) => {
+test("an unmatched row names only the fixes the card can offer", async (t) => {
   const { card, data } = fixture(t); await settle(card);
   data.items[0].price = null; data.items[0].stale = false;
+  data.items[0].history = [{ ts: 1700000000, price: 24.99 }];
   data.quality.unmatched_items = 1; data.quality.priced_items = 0;
   await card._load();
-  assert.match(card.shadowRoot.textContent, /no price match — refresh, rename or pin this item/);
-  assert.doesNotMatch(card.shadowRoot.textContent, /Unpriced/);
+  const text = card.shadowRoot.textContent;
+  // Refresh is on the card and Edit is on the row; pinning is a service a
+  // shopper cannot reach here, so the hint must not send them looking for it.
+  assert.match(text, /no price match — refresh, or edit the item to the words the store uses/);
+  assert.equal(/pin it/i.test(text), false);
+  assert.match(text, /Last seen \$24\.99/);
+  assert.doesNotMatch(text, /Unpriced/);
 });
 
 const type = (card, input, value) => {
@@ -446,4 +452,12 @@ test("after a move the picker returns to unchosen", async (t) => {
   assert.equal(section.value, "");
   assert.match(section.options[0].textContent, /Current: Drinks — choose section/);
   assert.match(card._dialog.querySelector(".status-note").textContent, /Moved to Drinks/);
+});
+
+test("an unmatched row without history says so plainly", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.items[0].price = null; data.items[0].history = [];
+  data.quality.unmatched_items = 1; data.quality.priced_items = 0;
+  await card._load();
+  assert.equal(/Last seen/.test(card.shadowRoot.textContent), false);
 });

@@ -11,6 +11,7 @@ from homeassistant.exceptions import ServiceValidationError
 
 import smart_shopping_route.todo as todo_module
 from smart_shopping_route.models import RouteSection
+from smart_shopping_route.price_coordinator import PricePoint
 from smart_shopping_route.prices import PriceQuote
 from smart_shopping_route.todo import SmartShoppingRouteTodo
 
@@ -45,10 +46,13 @@ class FakePrices:
     enabled = False
     chain = "none"
 
-    def __init__(self, quotes=None, failed=None, alternatives=None) -> None:
+    def __init__(
+        self, quotes=None, failed=None, alternatives=None, history=None
+    ) -> None:
         self._quotes = quotes or {}
         self.failed = set(failed or ())
         self._alternatives = alternatives or {}
+        self.history = history or {}
         self.enabled = bool(self._quotes)
 
     def quote_for(self, summary):
@@ -62,6 +66,7 @@ class FakePrices:
         return SimpleNamespace(
             reference_point=lambda _key: None,
             stale_for=lambda _key: False,
+            points_for=lambda key: self.history.get(key, []),
             failed=self.failed,
         )
 
@@ -581,3 +586,15 @@ def test_a_single_option_gets_no_alternatives_line() -> None:
     ]
 
     assert visible == ["$4.00 · 2L · Pams Milk 2L"]
+
+
+def test_an_unmatched_item_says_what_was_last_paid() -> None:
+    """A bare "no match" hides the one fact that helps: what it used to cost."""
+
+    entity, coordinator = make_entity()
+    coordinator.prices = FakePrices(
+        failed={"milk"}, history={"milk": [PricePoint(1_700_000_000, 4.99)]}
+    )
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+
+    assert "no price match · last seen $4.99 (2023-11-14)" in displayed.description
