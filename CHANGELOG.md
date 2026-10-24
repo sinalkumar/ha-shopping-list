@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.20
+
+- Tell a delisting apart from a miss. When an item's remembered product is
+  absent from this store's current price file, the row reads `not in the store's
+  price file` instead of `no price match`, and drops the rename advice, because
+  nothing about the item's wording is wrong. A price file that cannot be read
+  reports the ordinary miss rather than blaming the shop's stock, and
+  Woolworths never makes this claim at all: it has no store price file to speak
+  for. Whatever the cause, the row still shows what was last paid.
+
 ## 0.8.19
 
 - Show what a price is for. The card row now names the matched product under the

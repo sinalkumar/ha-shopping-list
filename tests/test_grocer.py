@@ -888,6 +888,12 @@ def _catalogue_coordinator(monkeypatch, summaries, lookup, rows, store_id=228):
 
 
 CENTRUM_ITEM = "Centrum advance Adult 100pk (not 50+)"
+# This week's Ormiston file: the plain 100-tablet pack is gone from it and only
+# the 50+ box and the 60pk remain, which the item's own words rule out.
+CENTRUM_CATALOGUE_AFTER_DELISTING = [
+    (45610, "advance 50 daily multivitamin supplement 100 tablets", 24.99),
+    (45626, "advance adults daily multivitamin supplement 60 tablets", 18.99),
+]
 CENTRUM_CATALOGUE = [
     (45609, "advance adults daily multivitamin supplement 100 tablets", 24.99),
     (45610, "advance 50 daily multivitamin supplement 100 tablets", 24.99),
@@ -1053,3 +1059,86 @@ def test_an_unresolvable_retailer_pin_is_not_replaced_by_the_catalogue(
 
     assert snapshot.quotes == {}
     assert snapshot.failed == {"centrum advance adult 100pk (not 50+)"}
+
+
+def test_a_store_file_says_whether_it_lists_a_product(data_dir, monkeypatch) -> None:
+    """Three answers, not two: yes, no, and the file could not be read."""
+
+    data_dir._store_prices = {228: {45609: GrocerPrice(45609, 24.99, None)}}
+    assert data_dir.lists_product(228, 45609) is True
+    assert data_dir.lists_product(228, 45610) is False
+
+    monkeypatch.setattr(
+        GrocerData,
+        "store_prices",
+        lambda _self, _store: (_ for _ in ()).throw(GrocerError("unreadable")),
+    )
+    assert data_dir.lists_product(228, 45609) is None
+
+    data_dir._store_prices = {228: {}}
+    assert data_dir.lists_product(228, 45609) is None
+
+
+def test_an_unpriced_item_says_why_when_the_store_stopped_listing_it(
+    monkeypatch,
+) -> None:
+    """The reported case: a product we priced left the store's weekly file.
+
+    Saying "no price match" there blames the item's wording for a fact about the
+    shop's stock, and sends a shopper to rename something that was never wrong.
+    """
+
+    summaries = [CENTRUM_ITEM]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE_AFTER_DELISTING
+    )
+    # The product this item's history is bound to, as restored from storage.
+    coordinator._history_products["centrum advance adult 100pk (not 50+)"] = 45609
+
+    async def lists(_store_id, product_id):
+        return product_id != 45609  # vanished from the store's file
+
+    coordinator._grocer_data.async_lists_product = lists
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.unpriced_reason_for(CENTRUM_ITEM) == "not_listed"
+
+
+def test_an_unreadable_store_file_reports_an_ordinary_miss(monkeypatch) -> None:
+    """A file this machine failed to read must not be reported as a delisting."""
+
+    summaries = [CENTRUM_ITEM]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE_AFTER_DELISTING
+    )
+    coordinator._history_products["centrum advance adult 100pk (not 50+)"] = 45609
+
+    async def unknown(_store_id, _product_id):
+        return None
+
+    coordinator._grocer_data.async_lists_product = unknown
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.unpriced_reason_for(CENTRUM_ITEM) == "no_match"
+
+
+def test_woolworths_never_claims_a_delisting(monkeypatch) -> None:
+    """A Woolworths miss says nothing about any store's shelf file."""
+
+    summaries = [CENTRUM_ITEM]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE
+    )
+    coordinator.chain = "woolworths"
+    coordinator._history_products["centrum advance adult 100pk (not 50+)"] = 45609
+
+    async def forbidden(*_args):
+        raise AssertionError("Woolworths has no store price file to consult")
+
+    coordinator._grocer_data.async_lists_product = forbidden
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.unpriced_reason_for(CENTRUM_ITEM) == "no_match"

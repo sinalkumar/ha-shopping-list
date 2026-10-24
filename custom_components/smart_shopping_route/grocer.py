@@ -446,6 +446,30 @@ class GrocerData:
                 found.append((product_id, _display_name(label), row))
         return found
 
+    def lists_product(self, store_id: int, product_id: int) -> bool | None:
+        """Whether this store's price file still lists a product.
+
+        ``None`` means the file could not be read, which is not the same answer
+        as "no": a household must not be told a product left the shelves
+        because this machine failed to read a parquet file.
+        """
+
+        try:
+            prices = self.store_prices(store_id)
+        except (GrocerError, OSError, ParquetError) as err:
+            _LOGGER.debug("grocer.nz store prices unavailable: %s", err)
+            return None
+        if not prices:
+            return None
+        return product_id in prices
+
+    async def async_lists_product(self, store_id: int, product_id: int) -> bool | None:
+        """Return :meth:`lists_product` with the parquet read off the loop."""
+
+        return await self.hass.async_add_executor_job(
+            self.lists_product, store_id, product_id
+        )
+
     async def async_catalogue_candidates(
         self, store_id: int, tokens: set[str], include: int | None = None
     ) -> list[tuple[int, str, GrocerPrice]]:

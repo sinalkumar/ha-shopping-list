@@ -79,6 +79,11 @@ def route_payload(coordinator: Any, *, can_control: bool) -> dict[str, Any]:
             "completed": completed,
             "section": coordinator.section_for(item),
             "price": quote.as_dict() if quote else None,
+            # Only set when the cause is known, so the card never explains a miss
+            # it cannot account for.
+            "unpriced_reason": None
+            if quote
+            else prices.unpriced_reason_for(item.summary or ""),
             "alternatives": [
                 {
                     "product_id": option.product_id,

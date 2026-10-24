@@ -283,3 +283,25 @@ def test_the_native_list_labels_a_store_file_price(monkeypatch) -> None:
 
     assert row["price"]["product_name"].startswith("Advance Adults")
     assert row["price"]["from_store_file"] is True
+
+
+def test_the_payload_says_when_a_store_stopped_listing_a_product(monkeypatch) -> None:
+    """The card must not blame the item's wording for the shop's stock."""
+
+    coordinator = route(monkeypatch)
+    coordinator.prices.snapshot.quotes.pop("milk", None)
+    coordinator.prices.snapshot.failed.add("milk")
+    coordinator.prices._unpriced_reason["milk"] = "not_listed"
+
+    row = ui.route_payload(coordinator, can_control=True)["items"][0]
+
+    assert row["price"] is None
+    assert row["unpriced_reason"] == "not_listed"
+
+
+def test_a_priced_row_carries_no_unpriced_reason(monkeypatch) -> None:
+    coordinator = route(monkeypatch)
+    row = ui.route_payload(coordinator, can_control=True)["items"][0]
+
+    assert row["price"] is not None
+    assert row["unpriced_reason"] is None

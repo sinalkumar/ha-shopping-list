@@ -314,6 +314,10 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         # Items whose price came from the store catalogue rather than a search,
         # kept so diagnostics can answer "where did this price come from?".
         self._catalogue_sourced: set[str] = set()
+        # Why an item has no price, when that is knowable: "not_listed" means the
+        # store's own price file no longer carries the product, which is a
+        # different problem from a search that could not be trusted.
+        self._unpriced_reason: dict[str, str] = {}
         self._last_store_sync = 0.0
         self._mirror_bytes: int | None = None
         self._price_store = PriceStore(hass, entry.entry_id)
@@ -1018,6 +1022,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
                 self._snapshot.store_history.pop(key, None)
                 self._matched_products.pop(key, None)
                 self._catalogue_sourced.discard(key)
+                self._unpriced_reason.pop(key, None)
                 # The item is gone, so its imported history went with it. A
                 # re-added item must import again; otherwise the cached flag
                 # silently suppresses its store history until the next mirror
@@ -1104,6 +1109,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             # decision: drop it so the next cycle can match afresh instead of
             # leaving the item unpriced until someone notices.
             self._snapshot.failed.add(key)
+            self._unpriced_reason[key] = await self._async_unpriced_reason(key)
             self._catalogue_sourced.discard(key)
             self._snapshot.quotes.pop(key, None)
             self._snapshot.observed_at.pop(key, None)
@@ -1120,6 +1126,7 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
             self._schedule_retry(key)
             return
         self._snapshot.failed.discard(key)
+        self._unpriced_reason.pop(key, None)
         if catalogue:
             self._catalogue_sourced.add(key)
         else:
@@ -1144,6 +1151,32 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
         self._snapshot.quotes[key] = quote
         self._snapshot.observed_at[key] = observed
         await self._async_backfill(key, quote)
+
+    async def _async_unpriced_reason(self, key: str) -> str:
+        """Explain a miss when the data can tell the two causes apart.
+
+        "No price match" is the honest answer when a search found nothing
+        trustworthy. It is the wrong answer when the store's own price file has
+        simply stopped carrying a product we used to price: nothing about the
+        item or its wording is wrong, so renaming it would not help. Only a file
+        that loaded says that; an unreadable file reports the ordinary miss.
+        """
+
+        if self.chain != CHAIN_PAKNSAVE or self.grocer_store_id is None:
+            return "no_match"
+        known = self._history_products.get(key)
+        pin = self._pins.get(key)
+        if pin is not None and pin.grocer_product_id:
+            known = pin.grocer_product_id
+        if not known:
+            return "no_match"
+        listed = await self.grocer.async_lists_product(self.grocer_store_id, known)
+        return "not_listed" if listed is False else "no_match"
+
+    def unpriced_reason_for(self, summary: str) -> str | None:
+        """Return why an item has no price, when that is knowable."""
+
+        return self._unpriced_reason.get(normalize_summary(summary))
 
     async def _async_catalogue_quote(
         self, summary: str, pin: ProductPin | None

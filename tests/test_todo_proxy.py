@@ -53,7 +53,11 @@ class FakePrices:
         self.failed = set(failed or ())
         self._alternatives = alternatives or {}
         self.history = history or {}
+        self.unpriced_reason = None
         self.enabled = bool(self._quotes)
+
+    def unpriced_reason_for(self, _summary):
+        return self.unpriced_reason
 
     def quote_for(self, summary):
         return self._quotes.get(summary)
@@ -598,3 +602,19 @@ def test_an_unmatched_item_says_what_was_last_paid() -> None:
     displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
 
     assert "no price match · last seen $4.99 (2023-11-14)" in displayed.description
+
+
+def test_a_delisted_item_says_the_store_stopped_listing_it() -> None:
+    """A file that dropped the product is not a wording problem."""
+
+    entity, coordinator = make_entity()
+    coordinator.prices = FakePrices(
+        failed={"milk"}, history={"milk": [PricePoint(1_700_000_000, 4.99)]}
+    )
+    coordinator.prices.unpriced_reason = "not_listed"
+    displayed = next(i for i in entity.todo_items if i.uid == "uid-1")
+
+    assert (
+        "not in the store's price file · last seen $4.99 (2023-11-14)"
+        in displayed.description
+    )

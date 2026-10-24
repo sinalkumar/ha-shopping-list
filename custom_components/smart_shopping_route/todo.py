@@ -167,14 +167,23 @@ class SmartShoppingRouteTodo(TodoListEntity):
             # native to-do list too, where refresh/rename/pin do not exist, so
             # the guidance lives in the card that has those controls.
             if key in snapshot.failed:
-                # What we last saw is the one fact that helps: a shopper who paid
-                # $24.99 three days ago is not helped by a bare "no match".
+                # Say which miss this is. A product that left the store's price
+                # file is not a wording problem, so "rename this item" would be
+                # wrong advice, and the difference is worth a separate sentence.
+                reason = self.coordinator.prices.unpriced_reason_for(item.summary or "")
+                label = (
+                    "not in the store's price file"
+                    if reason == "not_listed"
+                    else "no price match"
+                )
+                # What we last saw is the one fact that helps either way: a
+                # shopper who paid $24.99 three days ago deserves to see it.
                 series = snapshot.points_for(key)
                 if series:
                     last = series[-1]
                     day = datetime.fromtimestamp(last.ts, UTC).date().isoformat()
-                    return f"no price match · last seen ${last.price:.2f} ({day})"
-                return "no price match"
+                    return f"{label} · last seen ${last.price:.2f} ({day})"
+                return label
             return None
         parts = [f"${quote.price:.2f}"]
 

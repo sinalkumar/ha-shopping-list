@@ -252,8 +252,17 @@ class SmartShoppingRouteCard extends HTMLElement {
       } else if (data.prices_enabled && !item.completed) {
         // Name only what this card can actually do. Pinning is a service, and
         // telling someone here to "pin it" points at a control that is not on
-        // the screen.
-        body.append(node("div", "no price match — refresh, or edit the item to the words the store uses", "muted"));
+        // the screen. A product that left the store's price file is not a
+        // wording problem, so it gets its own sentence and no rename advice.
+        body.append(
+          node(
+            "div",
+            item.unpriced_reason === "not_listed"
+              ? "not in this store's price file"
+              : "no price match — refresh, or edit the item to the words the store uses",
+            "muted"
+          )
+        );
         const last = item.history?.[item.history.length - 1];
         if (last) body.append(node("div", `Last seen ${money(last.price)} · ${date(last.ts)}`, "muted"));
       }

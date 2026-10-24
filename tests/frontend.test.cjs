@@ -461,3 +461,16 @@ test("an unmatched row without history says so plainly", async (t) => {
   await card._load();
   assert.equal(/Last seen/.test(card.shadowRoot.textContent), false);
 });
+
+test("a delisted row does not advise renaming the item", async (t) => {
+  const { card, data } = fixture(t); await settle(card);
+  data.items[0].price = null;
+  data.items[0].unpriced_reason = "not_listed";
+  data.items[0].history = [{ ts: 1700000000, price: 24.99 }];
+  data.quality.unmatched_items = 1; data.quality.priced_items = 0;
+  await card._load();
+  const text = card.shadowRoot.textContent;
+  assert.match(text, /not in this store's price file/);
+  assert.equal(/edit the item to the words/.test(text), false);
+  assert.match(text, /Last seen \$24\.99/);
+});
