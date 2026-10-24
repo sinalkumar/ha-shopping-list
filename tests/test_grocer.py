@@ -1105,6 +1105,29 @@ def test_an_unpriced_item_says_why_when_the_store_stopped_listing_it(
     assert coordinator.unpriced_reason_for(CENTRUM_ITEM) == "not_listed"
 
 
+def test_the_remembered_product_survives_a_restart_via_the_identity(
+    monkeypatch,
+) -> None:
+    """The identity is persisted every refresh; the memory must not need a pin."""
+
+    summaries = [CENTRUM_ITEM]
+    coordinator = _catalogue_coordinator(
+        monkeypatch, lambda: list(summaries), {}, CENTRUM_CATALOGUE_AFTER_DELISTING
+    )
+    key = "centrum advance adult 100pk (not 50+)"
+    # Exactly what a restart restores: the last quote's product, from storage.
+    coordinator._identities[key] = '["paknsave","228",null,"catalogue:45609",null]'
+
+    async def lists(_store_id, product_id):
+        return product_id != 45609
+
+    coordinator._grocer_data.async_lists_product = lists
+
+    asyncio.run(coordinator._async_update_data())
+
+    assert coordinator.unpriced_reason_for(CENTRUM_ITEM) == "not_listed"
+
+
 def test_an_unreadable_store_file_reports_an_ordinary_miss(monkeypatch) -> None:
     """A file this machine failed to read must not be reported as a delisting."""
 

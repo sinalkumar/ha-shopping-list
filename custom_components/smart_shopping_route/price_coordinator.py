@@ -1164,14 +1164,35 @@ class PriceCoordinator(DataUpdateCoordinator[PriceSnapshot]):
 
         if self.chain != CHAIN_PAKNSAVE or self.grocer_store_id is None:
             return "no_match"
-        known = self._history_products.get(key)
-        pin = self._pins.get(key)
-        if pin is not None and pin.grocer_product_id:
-            known = pin.grocer_product_id
-        if not known:
+        known = self._remembered_store_product(key)
+        if known is None:
             return "no_match"
         listed = await self.grocer.async_lists_product(self.grocer_store_id, known)
         return "not_listed" if listed is False else "no_match"
+
+    def _remembered_store_product(self, key: str) -> int | None:
+        """The store product this item was last priced from, if one is known.
+
+        The comparison identity is persisted on every refresh, so it survives a
+        restart and is the most reliable record: it holds the exact product the
+        last quote came from. A backfilled history product and an explicit pin
+        are consulted after it.
+        """
+
+        identity = self._identities.get(key)
+        if identity:
+            try:
+                parts = json.loads(identity)
+            except (TypeError, ValueError):
+                parts = []
+            if isinstance(parts, list) and len(parts) > 3:
+                found = catalogue_product_id(str(parts[3]))
+                if found is not None:
+                    return found
+        pin = self._pins.get(key)
+        if pin is not None and pin.grocer_product_id:
+            return pin.grocer_product_id
+        return self._history_products.get(key)
 
     def unpriced_reason_for(self, summary: str) -> str | None:
         """Return why an item has no price, when that is knowable."""
